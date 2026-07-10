@@ -1,0 +1,106 @@
+:root {
+  --bg: #12100e;
+  --panel: #1a1712;
+  --panel-2: #201c15;
+  --line: #2e2920;
+  --ink: #e8e3d8;
+  --faded: #9a927f;
+  --gold: #c6a15b;
+  --gold-soft: rgba(198, 161, 91, 0.12);
+  --red: #b5503c;
+  --red-soft: rgba(181, 80, 60, 0.15);
+  --serif: "Cormorant Garamond", Georgia, serif;
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+input, select, textarea, button { font-family: var(--sans); }
+
+input, select, textarea {
+  width: 100%;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  padding: 11px 13px;
+  font-size: 14px;
+}
+input:focus, select:focus, textarea:focus, button:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 1px;
+}
+input[type="date"] { color-scheme: dark; }
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  padding: 11px 20px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--gold);
+  color: #16130d;
+}
+.btn.ghost {
+  background: transparent;
+  color: var(--gold);
+  border: 1px solid var(--gold);
+}
+.btn.quiet {
+  background: transparent;
+  color: var(--faded);
+  border: 1px solid var(--line);
+}
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.linklike {
+  background: none; border: none; padding: 0; cursor: pointer;
+  color: var(--faded); font-size: 12px; text-decoration: underline;
+}
+
+/* ---------- the voice orb (signature element) ---------- */
+.orb {
+  width: 84px; height: 84px; border-radius: 50%;
+  border: 1px solid var(--gold);
+  background: radial-gradient(circle at 35% 30%, rgba(198,161,91,0.35), rgba(198,161,91,0.06) 65%);
+  color: var(--gold);
+  font-size: 26px;
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: transform 0.15s ease;
+}
+.orb:hover { transform: scale(1.04); }
+.orb.listening {
+  animation: orb-pulse 1.6s ease-in-out infinite;
+  background: radial-gradient(circle at 35% 30%, rgba(198,161,91,0.6), rgba(198,161,91,0.12) 65%);
+}
+@keyframes orb-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(198, 161, 91, 0.35); }
+  50% { box-shadow: 0 0 0 22px rgba(198, 161, 91, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .orb.listening { animation: none; box-shadow: 0 0 0 6px rgba(198,161,91,0.25); }
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+.chip {
+  font-size: 12px; font-weight: 600;
+  padding: 4px 12px; border-radius: 999px; white-space: nowrap;
+}
+
+.fadein { animation: fadein 0.25s ease; }
+@keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }

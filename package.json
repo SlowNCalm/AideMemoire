@@ -1,0 +1,19 @@
+{
+  "name": "aide-memoire",
+  "version": "1.0.0",
+  "description": "A private remembrancer: tracks important dates for the people in your life and emails you before each one.",
+  "type": "module",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "build": "cd client && npm install && npm run build",
+    "postinstall": "cd client && npm install"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  }
+}

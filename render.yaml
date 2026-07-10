@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: aide-memoire
+    runtime: node
+    plan: starter          # needs an always-on instance so the daily cron fires
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    disk:
+      name: aide-memoire-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: DATA_DIR
+        value: /var/data
+      - key: TIMEZONE
+        value: America/Toronto
+      - key: CRON_EXPR
+        value: "0 8 * * *"          # 8:00 AM daily reminder sweep
+      - key: ACCESS_CODE
+        sync: false                  # set in dashboard: your private login code
+      - key: APP_SECRET
+        generateValue: true
+      - key: CRON_SECRET
+        generateValue: true
+      - key: RESEND_API_KEY
+        sync: false                  # set in dashboard: from resend.com
+      - key: REMINDER_EMAIL_TO
+        sync: false                  # set in dashboard: your email address
+      - key: REMINDER_EMAIL_FROM
+        value: "Aide-Mémoire <onboarding@resend.dev>"
