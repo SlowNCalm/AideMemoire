@@ -3,111 +3,143 @@ import crypto from "crypto";
 import path from "path";
 import { fileURLToPath } from "url";
 import cron from "node-cron";
-import { Entries } from "./db.js";
-import { runReminderSweep, nextOccurrence, daysUntil } from "./reminders.js";
-import { llmParse } from "./llm.js";
+import { Entries, Users, Sessions } from "./db.js";
+import { runReminderSweep, nextOccurrence, daysUntil, findConflicts, todayISO } from "./reminders.js";
+import { assistant } from "./llm.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json());
 
-const ACCESS_CODE = process.env.ACCESS_CODE || "";
-const SECRET = process.env.APP_SECRET || crypto.randomBytes(32).toString("hex");
-const CRON_SECRET = process.env.CRON_SECRET || "";
+const INVITE_CODE = process.env.INVITE_CODE || ""; // optional: gate signups during beta
 
-const sign = (v) => crypto.createHmac("sha256", SECRET).update(v).digest("hex");
-const TOKEN = sign("aide-memoire-session");
+// ---------- password helpers ----------
+const hashPassword = (pw) => {
+  const salt = crypto.randomBytes(16).toString("hex");
+  return salt + ":" + crypto.scryptSync(pw, salt, 64).toString("hex");
+};
+const checkPassword = (pw, stored) => {
+  const [salt, hash] = (stored || "").split(":");
+  if (!salt || !hash) return false;
+  const test = crypto.scryptSync(pw, salt, 64);
+  return crypto.timingSafeEqual(test, Buffer.from(hash, "hex"));
+};
 
 // ---------- auth ----------
+app.post("/api/signup", (req, res) => {
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const password = String(req.body?.password || "");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: "A valid email is required — it's where your reminders go." });
+  if (password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters." });
+  if (INVITE_CODE && req.body?.invite !== INVITE_CODE) return res.status(403).json({ error: "An invite code is required during the beta." });
+  if (Users.byEmail(email)) return res.status(409).json({ error: "That email already has an account — log in instead." });
+
+  const user = { id: "u" + crypto.randomUUID(), email, password_hash: hashPassword(password), timezone: String(req.body?.timezone || "America/Toronto").slice(0, 60) };
+  Users.create(user);
+  if (Users.count() === 1) Entries.adoptOrphans(user.id); // migrate single-user era data
+  const token = crypto.randomBytes(32).toString("hex");
+  Sessions.create(token, user.id);
+  res.status(201).json({ token, email });
+});
+
 app.post("/api/login", (req, res) => {
-  if (!ACCESS_CODE) return res.json({ token: TOKEN, note: "no ACCESS_CODE set" });
-  if (req.body?.code === ACCESS_CODE) return res.json({ token: TOKEN });
-  res.status(401).json({ error: "Wrong access code." });
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const user = Users.byEmail(email);
+  if (!user || !checkPassword(String(req.body?.password || ""), user.password_hash))
+    return res.status(401).json({ error: "Email or password not recognized." });
+  const token = crypto.randomBytes(32).toString("hex");
+  Sessions.create(token, user.id);
+  res.json({ token, email: user.email });
+});
+
+app.post("/api/logout", (req, res) => {
+  const token = (req.headers.authorization || "").replace("Bearer ", "");
+  if (token) Sessions.destroy(token);
+  res.json({ ok: true });
 });
 
 function requireAuth(req, res, next) {
-  if (!ACCESS_CODE) return next(); // open mode if no code configured
-  const h = req.headers.authorization || "";
-  if (h === `Bearer ${TOKEN}`) return next();
-  res.status(401).json({ error: "Unauthorized" });
+  const token = (req.headers.authorization || "").replace("Bearer ", "");
+  const user = token && Sessions.user(token);
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+  req.user = user;
+  next();
 }
 
-// ---------- entries API ----------
-app.get("/api/entries", requireAuth, (_req, res) => {
-  const rows = Entries.all().map((e) => ({
-    ...e,
-    yearly: !!e.yearly,
-    next_occurrence: nextOccurrence(e),
-    days_until: daysUntil(e),
-  }));
-  res.json(rows);
+app.get("/api/me", requireAuth, (req, res) => res.json({ email: req.user.email }));
+
+// ---------- entries ----------
+const enrich = (e) => ({ ...e, yearly: !!e.yearly, next_occurrence: nextOccurrence(e), days_until: daysUntil(e) });
+
+app.get("/api/entries", requireAuth, (req, res) => {
+  res.json(Entries.forUser(req.user.id).map(enrich));
 });
 
-function cleanEntry(body, id) {
+function cleanEntry(body, id, userId) {
   const name = String(body.name || "").trim().slice(0, 120);
   const date = String(body.date || "");
   if (!name || !/^\d{4}-\d{2}-\d{2}$/.test(date)) return null;
   return {
-    id,
-    name,
+    id, user_id: userId, name,
     occasion: String(body.occasion || "birthday").slice(0, 40),
-    date,
-    yearly: body.yearly ? 1 : 0,
+    date, yearly: body.yearly ? 1 : 0,
     todo: String(body.todo || "").trim().slice(0, 500),
     remind_days: Math.max(0, Math.min(90, Number(body.remind_days) || 0)),
   };
 }
 
 app.post("/api/entries", requireAuth, (req, res) => {
-  const e = cleanEntry(req.body, "d" + crypto.randomUUID());
+  const e = cleanEntry(req.body, "d" + crypto.randomUUID(), req.user.id);
   if (!e) return res.status(400).json({ error: "A name and a valid date are required." });
+  const conflicts = findConflicts(req.user.id, e, null);
   Entries.create(e);
-  res.status(201).json({ ...e, yearly: !!e.yearly, next_occurrence: nextOccurrence(e), days_until: daysUntil(e) });
+  res.status(201).json({ ...enrich(e), conflicts });
 });
 
 app.put("/api/entries/:id", requireAuth, (req, res) => {
-  if (!Entries.get(req.params.id)) return res.status(404).json({ error: "Not found" });
-  const e = cleanEntry(req.body, req.params.id);
+  if (!Entries.get(req.params.id, req.user.id)) return res.status(404).json({ error: "Not found" });
+  const e = cleanEntry(req.body, req.params.id, req.user.id);
   if (!e) return res.status(400).json({ error: "A name and a valid date are required." });
+  const conflicts = findConflicts(req.user.id, e, e.id);
   Entries.update(e);
-  res.json({ ...e, yearly: !!e.yearly, next_occurrence: nextOccurrence(e), days_until: daysUntil(e) });
+  res.json({ ...enrich(e), conflicts });
 });
 
 app.delete("/api/entries/:id", requireAuth, (req, res) => {
-  Entries.remove(req.params.id);
+  Entries.remove(req.params.id, req.user.id);
   res.json({ ok: true });
 });
 
-// ---------- voice parsing (LLM) ----------
-app.post("/api/parse", requireAuth, async (req, res) => {
-  const text = String(req.body?.text || "").slice(0, 1000);
+// ---------- the conversational assistant ----------
+app.post("/api/assistant", requireAuth, async (req, res) => {
+  const text = String(req.body?.text || "").slice(0, 1500);
   if (!text.trim()) return res.status(400).json({ error: "No speech provided." });
-  const result = await llmParse({
+  const entries = Entries.forUser(req.user.id).map(enrich);
+  const result = await assistant({
     text,
     draft: req.body?.draft || null,
-    today: new Date().toLocaleDateString("en-CA", { timeZone: process.env.TIMEZONE || "America/Toronto" }),
+    entries,
+    today: todayISO(req.user.timezone),
   });
-  if (!result) return res.json({ fallback: true }); // client uses local heuristics
+  if (!result) return res.json({ fallback: true });
+  // pre-compute conflicts for a proposed entry so the client can warn verbally
+  if (result.intent === "entry" && result.entry?.date) {
+    result.conflicts = findConflicts(req.user.id, { date: result.entry.date, yearly: result.entry.yearly }, req.body?.draft?.id || null);
+  }
   res.json(result);
 });
 
-// ---------- reminder trigger ----------
-// Internal cron (works when the service is always-on) …
-const CRON_EXPR = process.env.CRON_EXPR || "0 8 * * *"; // 8:00 every morning
-cron.schedule(CRON_EXPR, () => runReminderSweep(), {
-  timezone: process.env.TIMEZONE || "America/Toronto",
-});
+// ---------- reminders ----------
+const CRON_EXPR = process.env.CRON_EXPR || "0 8 * * *";
+cron.schedule(CRON_EXPR, () => runReminderSweep(), { timezone: process.env.TIMEZONE || "America/Toronto" });
 
-// … plus an external trigger so a service like cron-job.org can also fire it.
+const CRON_SECRET = process.env.CRON_SECRET || "";
 app.post("/api/reminders/run", async (req, res) => {
-  if (CRON_SECRET && req.query.key !== CRON_SECRET)
-    return res.status(401).json({ error: "Bad cron key" });
+  if (CRON_SECRET && req.query.key !== CRON_SECRET) return res.status(401).json({ error: "Bad cron key" });
   res.json(await runReminderSweep());
 });
-
-// Manual "send me a test sweep now" from the UI
-app.post("/api/reminders/test", requireAuth, async (_req, res) => {
-  res.json(await runReminderSweep());
+app.post("/api/reminders/test", requireAuth, async (req, res) => {
+  res.json(await runReminderSweep(req.user.id));
 });
 
 // ---------- static frontend ----------

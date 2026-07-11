@@ -29,13 +29,15 @@ async function req(path, opts = {}) {
 }
 
 export const api = {
-  login: (code) => req("/api/login", { method: "POST", body: JSON.stringify({ code }) }),
+  signup: (email, password, invite) => req("/api/signup", { method: "POST", body: JSON.stringify({ email, password, invite, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }) }),
+  login: (email, password) => req("/api/login", { method: "POST", body: JSON.stringify({ email, password }) }),
+  logout: () => req("/api/logout", { method: "POST" }).catch(() => {}),
   list: () => req("/api/entries"),
   create: (e) => req("/api/entries", { method: "POST", body: JSON.stringify(e) }),
   update: (e) => req(`/api/entries/${e.id}`, { method: "PUT", body: JSON.stringify(e) }),
   remove: (id) => req(`/api/entries/${id}`, { method: "DELETE" }),
   testReminder: () => req("/api/reminders/test", { method: "POST" }),
-  parse: (text, draft) => req("/api/parse", { method: "POST", body: JSON.stringify({ text, draft }) }),
+  assistant: (text, draft) => req("/api/assistant", { method: "POST", body: JSON.stringify({ text, draft }) }),
 };
 
 // ---------------- occasions ----------------
@@ -282,6 +284,18 @@ export const persona = {
   unclear: () => pick(["Forgive me, sir — say yes to keep it, or tell me what to amend.", "I didn't quite catch that. Yes to file it, or name the correction."]),
   stillThere: () => pick(["Whenever you're ready, sir. The buttons below also serve.", "I remain at your disposal — voice or buttons, as you prefer."]),
 };
+persona.conflict = (names) => {
+  const list = names.join(" and ");
+  const opts = [
+    `Do note, sir — that falls on the same day as ${list}.`,
+    `A word of caution: that coincides with ${list}, sir.`,
+    `Mind the calendar, sir — ${list} lands on the same day.`,
+  ];
+  return opts[Math.floor(Math.random() * opts.length)];
+};
+persona.showCalendar = () => "The calendar, sir.";
+persona.showList = () => "The ledger, sir.";
+
 export function leadPhrase(days) {
   if (days === 0) return "on the day itself";
   if (days === 1) return "the day before";

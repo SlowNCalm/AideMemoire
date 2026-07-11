@@ -1,65 +1,64 @@
-// Turns free-form speech into a structured entry using the Anthropic API.
-// Falls back gracefully (returns null) if no key is configured or the call fails.
+// The assistant brain: turns speech into structured intents with a spoken reply,
+// aware of the user's existing ledger. Returns null if no API key / failure.
 
-const SYSTEM = `You convert spoken requests about remembering dates into strict JSON. The speaker wants to track an important date for someone and be emailed a reminder beforehand.
+const SYSTEM = `You are Aide-Mémoire, a voice executive assistant with the manner of an impeccably composed, dryly witty English butler. You help busy people track important dates for the people and relationships in their lives and remind them what to arrange. Address the speaker as "sir" unless they've asked otherwise. Original phrasing only — never quote or imitate any film or franchise character.
 
-Return ONLY a JSON object, no prose, no markdown fences:
+You receive: today's date, the user's current LEDGER (their saved entries), optionally a DRAFT being discussed, and their latest speech.
+
+Return ONLY strict JSON, no prose, no markdown fences:
 {
-  "intent": "entry" | "save" | "cancel" | "edit_by_hand",
-  "entry": {
-    "name": string,              // who it's for, e.g. "Mother", "James", "The Hendersons". Capitalize. Empty string if truly not stated.
-    "occasion": "birthday" | "anniversary" | "memorial" | "holiday" | "checkin" | "event",
-    "date": "yyyy-mm-dd" | "",   // resolve relative dates ("next Friday") using the provided today. If a yearly date like a birthday, any future occurrence is fine.
-    "yearly": boolean,           // birthdays/anniversaries/memorials/holidays: true. one-off events/check-ins: false, unless stated otherwise.
-    "todo": string,              // what to arrange/do, e.g. "order white orchids". Empty if none.
-    "remind_days": number        // days before to email. "two weeks before"=14, "a month"=30, "day before"=1, "on the day"=0. Default 7 if unstated.
-  },
-  "missing": string[],           // subset of ["name","date"] that could not be determined
-  "reply": string                // ONE short spoken line (max ~18 words) in the voice of an impeccably mannered, dryly witty English butler AI. Address the speaker as "sir". Confirm what you understood or ask for the one missing detail. Never obsequious to the point of parody; composed, precise, faintly amused. Original phrasing only — do not quote or imitate lines from any film or franchise.
+  "intent": "entry" | "save" | "cancel" | "edit_by_hand" | "show" | "answer" | "delete" | "none",
+  "entry": { "name": string, "occasion": "birthday"|"anniversary"|"memorial"|"holiday"|"checkin"|"event", "date": "yyyy-mm-dd"|"", "yearly": boolean, "todo": string, "remind_days": number } | null,
+  "missing": string[],          // subset of ["name","date"] not determinable (entry intent only)
+  "view": "calendar"|"list"|null,   // for intent "show"
+  "month": "yyyy-mm"|null,          // for intent "show" when a specific month was asked for
+  "delete_id": string|null,         // for intent "delete": the id of the ledger entry to remove
+  "reply": string               // ONE spoken line, max ~30 words, in persona. ALWAYS present.
 }
 
-Rules:
-- intent "save": the speaker is confirming ("yes", "keep it", "sounds good", "perfect", "save").
-- intent "cancel": discarding ("no cancel", "never mind", "scrap that").
-- intent "edit_by_hand": they want to type ("let me type", "open the form").
-- Otherwise intent "entry".
-- If a CURRENT DRAFT is provided, the speech is a correction or addition: merge it into the draft and return the complete updated entry. Only change fields the speaker mentioned. A bare name-like answer means the name; a bare date means the date.
-- Never invent a name or date that wasn't stated. Speech-to-text may mangle words; interpret charitably (e.g. "remind me to weeks before" = "two weeks before").`;
+Intent guide:
+- "entry": adding a new date, or correcting the DRAFT (merge corrections into the full updated entry; change only what was mentioned; a bare name means the name, a bare date means the date).
+- "save": confirming the draft ("yes", "keep it", "perfect").
+- "cancel": discarding the draft or aborting.
+- "edit_by_hand": wants to type ("let me type", "open the form").
+- "show": navigation — "show me the calendar", "show March", "calendar view", "back to the list". Resolve month names to yyyy-mm using today.
+- "answer": a question about the ledger ("what's coming up this month?", "when is my mother's birthday?", "who needs attention?"). Answer precisely from LEDGER data in "reply".
+- "delete": removing an existing ledger entry ("remove James's dinner"). Match to a LEDGER id; if ambiguous, use intent "answer" and ask which one.
+- "none": chit-chat or anything else; respond briefly in persona.
 
-export async function llmParse({ text, draft, today }) {
+Executive-assistant duties for "entry": resolve relative dates from today. remind_days: "two weeks before"=14, "a month"=30, "day before"=1, "on the day"=0, default 7. yearly: birthdays/anniversaries/memorials/holidays true; one-off events/check-ins false unless stated. Never invent a name or date not stated. Interpret speech-to-text garbling charitably. In "reply", confirm what you understood or ask for the single missing detail.`;
+
+export async function assistant({ text, draft, entries, today }) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
   try {
+    const ledger = (entries || []).map((e) => ({
+      id: e.id, name: e.name, occasion: e.occasion, next: e.next_occurrence,
+      days_until: e.days_until, todo: e.todo || undefined, remind_days: e.remind_days,
+    }));
     const user =
       `Today is ${today}.\n` +
-      (draft ? `CURRENT DRAFT: ${JSON.stringify(draft)}\n` : "") +
+      `LEDGER: ${JSON.stringify(ledger)}\n` +
+      (draft ? `DRAFT under discussion: ${JSON.stringify(draft)}\n` : "") +
       `Speech: "${text}"`;
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: {
-        "x-api-key": key,
-        "anthropic-version": "2023-06-01",
-        "content-type": "application/json",
-      },
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
       body: JSON.stringify({
         model: process.env.PARSE_MODEL || "claude-haiku-4-5-20251001",
-        max_tokens: 400,
+        max_tokens: 600,
         system: SYSTEM,
         messages: [{ role: "user", content: user }],
       }),
     });
-    if (!res.ok) {
-      console.error("[parse] Anthropic API error:", res.status, await res.text());
-      return null;
-    }
+    if (!res.ok) { console.error("[assistant] API error:", res.status, await res.text()); return null; }
     const data = await res.json();
-    const textOut = (data.content || []).map((b) => b.text || "").join("");
-    const clean = textOut.replace(/```json|```/g, "").trim();
-    const parsed = JSON.parse(clean);
-    if (!parsed || typeof parsed !== "object" || !parsed.intent) return null;
+    const out = (data.content || []).map((b) => b.text || "").join("");
+    const parsed = JSON.parse(out.replace(/```json|```/g, "").trim());
+    if (!parsed || !parsed.intent) return null;
     return parsed;
   } catch (e) {
-    console.error("[parse] failed:", e.message);
+    console.error("[assistant] failed:", e.message);
     return null;
   }
 }

@@ -18,6 +18,13 @@ server/   Express + SQLite — entries API, HMAC session auth, node-cron daily s
 
 One Render web service runs both: Express serves the built frontend and the API.
 
+## v6: The product
+
+- **Accounts**: email + password signup; each user's ledger is private and reminders go to their own email. Optional `INVITE_CODE` env var gates signups during beta. The first account created adopts any dates saved under the old single-user version.
+- **Calendar view**: month grid with every commitment placed on its day; ⚠ marks days carrying multiple commitments; navigable by button or by voice ("show me November", "back to the ledger").
+- **Conversational assistant**: with `ANTHROPIC_API_KEY` set, every utterance is understood in context of your ledger — add dates, ask questions ("what's coming up this month?", "when is my mother's birthday?"), delete by voice ("remove James's dinner"), or switch views.
+- **Conflict detection**: adding or editing a date that lands on (or adjacent to) an existing commitment triggers a spoken warning and a flag, like a real EA would.
+
 ## Deploy to Render (~10 minutes)
 
 1. **Push this folder to a GitHub repo** (private is fine).

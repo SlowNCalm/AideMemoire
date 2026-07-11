@@ -4,6 +4,7 @@ import {
   OCCASIONS, parseUtterance, fmtDate, humanDays,
   speak, stopSpeaking, draftSummary, parseCorrection, persona, leadPhrase,
 } from "./lib.js";
+import Calendar from "./Calendar.jsx";
 
 // ============================================================ App shell
 export default function App() {
@@ -13,37 +14,54 @@ export default function App() {
     : <Gate onEnter={() => setAuthed(true)} />;
 }
 
-// ============================================================ Access gate
+// ============================================================ Auth (email + password)
 function Gate({ onEnter }) {
-  const [code, setCode] = useState("");
+  const [mode, setMode] = useState("login");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [invite, setInvite] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
     setBusy(true); setErr("");
     try {
-      const { token } = await api.login(code);
-      setToken(token);
+      const r = mode === "login" ? await api.login(email, password) : await api.signup(email, password, invite);
+      setToken(r.token);
       onEnter();
-    } catch {
-      setErr("That code wasn't recognized.");
-    } finally { setBusy(false); }
+    } catch (e) { setErr(e.message || "Something went wrong."); }
+    finally { setBusy(false); }
   };
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ width: "100%", maxWidth: 380, textAlign: "center" }}>
-        <Wordmark />
-        <p style={{ color: "var(--faded)", fontSize: 14, margin: "8px 0 28px" }}>Private access</p>
-        <input
-          type="password" placeholder="Access code" value={code}
-          onChange={(e) => setCode(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          style={{ textAlign: "center", letterSpacing: "0.2em" }}
-        />
-        {err && <p style={{ color: "var(--red)", fontSize: 13 }}>{err}</p>}
-        <button className="btn" style={{ width: "100%", marginTop: 14 }} disabled={busy || !code} onClick={submit}>
-          Enter
+      <div style={{ width: "100%", maxWidth: 400 }}>
+        <div style={{ textAlign: "center" }}>
+          <Wordmark />
+          <p style={{ color: "var(--faded)", fontSize: 14, margin: "8px 0 24px" }}>
+            Your executive assistant for the dates that matter.
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 0, marginBottom: 18, border: "1px solid var(--line)", borderRadius: 8, overflow: "hidden" }}>
+          {["login", "signup"].map((m) => (
+            <button key={m} onClick={() => { setMode(m); setErr(""); }}
+              style={{ flex: 1, padding: "10px 0", border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600,
+                background: mode === m ? "var(--gold)" : "transparent", color: mode === m ? "#16130d" : "var(--faded)" }}>
+              {m === "login" ? "Log in" : "Create account"}
+            </button>
+          ))}
+        </div>
+        <input type="email" placeholder="Email — this is where reminders go" value={email}
+          onChange={(e) => setEmail(e.target.value)} style={{ marginBottom: 10 }} />
+        <input type="password" placeholder={mode === "signup" ? "Password (8+ characters)" : "Password"} value={password}
+          onChange={(e) => setPassword(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} style={{ marginBottom: 10 }} />
+        {mode === "signup" && (
+          <input placeholder="Invite code (if required)" value={invite}
+            onChange={(e) => setInvite(e.target.value)} style={{ marginBottom: 10 }} />
+        )}
+        {err && <p style={{ color: "var(--red)", fontSize: 13, margin: "4px 0 10px" }}>{err}</p>}
+        <button className="btn" style={{ width: "100%" }} disabled={busy || !email || !password} onClick={submit}>
+          {mode === "login" ? "Enter" : "Begin"}
         </button>
       </div>
     </div>
@@ -108,8 +126,11 @@ export function listenUntilSilence({ silenceMs = 2000, maxMs = 45000, noSpeechMs
 function Dashboard({ onLogout }) {
   const [entries, setEntries] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [voiceText, setVoiceText] = useState(null); // utterance handed to VoiceReview
+  const [voiceSeed, setVoiceSeed] = useState(null); // {utterance, result} handed to VoiceReview
   const [manualDraft, setManualDraft] = useState(null);
+  const [view, setView] = useState("list");           // "list" | "calendar"
+  const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  const [thinking, setThinking] = useState(false);
   const [toast, setToast] = useState("");
   const toastTimer = useRef();
 
@@ -129,11 +150,55 @@ function Dashboard({ onLogout }) {
 
   const save = async (data) => {
     try {
-      if (data.id) { await api.update(data); notify("Saved."); }
-      else { await api.create(data); notify(`${data.name} — kept. Email ${data.remind_days === 0 ? "on the day" : `${data.remind_days}d before`}.`); }
-      setManualDraft(null); setVoiceText(null);
+      const r = data.id ? await api.update(data) : await api.create(data);
+      let msg = data.id ? "Saved." : `${data.name} — kept. Email ${data.remind_days === 0 ? "on the day" : `${data.remind_days}d before`}.`;
+      if (r.conflicts?.length) {
+        const names = r.conflicts.map((c) => c.name);
+        msg += ` ⚠ Same day as ${names.join(", ")}.`;
+        speak(persona.conflict(names));
+      }
+      notify(msg);
+      setManualDraft(null); setVoiceSeed(null);
       refresh();
     } catch (e) { notify(e.message); }
+  };
+
+  // route every utterance through the assistant
+  const handleUtterance = async (text) => {
+    setThinking(true);
+    let result = null;
+    try { result = await api.assistant(text, null); } catch { /* offline/401 handled below */ }
+    setThinking(false);
+
+    if (!result || result.fallback) {
+      // no AI key on the server — basic local routing
+      const lower = text.toLowerCase();
+      if (/\b(calendar|month view)\b/.test(lower)) { setView("calendar"); speak(persona.showCalendar()); return; }
+      if (/\b(list|ledger)\b/.test(lower) && lower.split(" ").length <= 5) { setView("list"); speak(persona.showList()); return; }
+      setVoiceSeed({ utterance: text, result: null });
+      return;
+    }
+
+    switch (result.intent) {
+      case "entry":
+        setVoiceSeed({ utterance: text, result });
+        break;
+      case "show":
+        if (result.view) setView(result.view);
+        if (result.month) setMonth(result.month);
+        if (result.view === "calendar" || result.month) setView("calendar");
+        if (result.reply) speak(result.reply);
+        break;
+      case "delete":
+        if (result.delete_id) { await api.remove(result.delete_id).catch(() => {}); refresh(); }
+        if (result.reply) { speak(result.reply); notify(result.reply); }
+        break;
+      case "answer":
+      case "none":
+      default:
+        if (result.reply) { speak(result.reply); notify(result.reply); }
+        break;
+    }
   };
 
   const remove = async (id) => { await api.remove(id).catch(() => {}); refresh(); };
@@ -149,7 +214,7 @@ function Dashboard({ onLogout }) {
   const sorted = [...entries].sort((a, b) => a.days_until - b.days_until);
   const attention = sorted.filter((e) => e.days_until <= e.remind_days);
   const later = sorted.filter((e) => !attention.includes(e));
-  const busy = voiceText !== null || manualDraft !== null;
+  const busy = voiceSeed !== null || manualDraft !== null || thinking;
 
   return (
     <div style={{ maxWidth: 780, margin: "0 auto", padding: "44px 20px 100px" }}>
@@ -166,7 +231,20 @@ function Dashboard({ onLogout }) {
         </div>
       </header>
 
-      <VoicePanel paused={busy} onUtterance={(t) => setVoiceText(t)} />
+      <VoicePanel paused={busy} onUtterance={handleUtterance} />
+
+      <div style={{ display: "flex", gap: 8, margin: "0 0 18px" }}>
+        {[["list", "Ledger"], ["calendar", "Calendar"]].map(([v, label]) => (
+          <button key={v} onClick={() => setView(v)}
+            style={{ padding: "7px 16px", borderRadius: 999, fontSize: 13, cursor: "pointer", fontWeight: view === v ? 600 : 400,
+              border: `1px solid ${view === v ? "var(--gold)" : "var(--line)"}`,
+              background: view === v ? "var(--gold-soft)" : "transparent",
+              color: view === v ? "var(--gold)" : "var(--faded)" }}>
+            {label}
+          </button>
+        ))}
+        {thinking && <span style={{ alignSelf: "center", fontSize: 13, color: "var(--faded)", fontStyle: "italic" }}>One moment…</span>}
+      </div>
 
       {toast && (
         <div className="card fadein" style={{ padding: "12px 16px", margin: "0 0 20px", borderColor: "var(--gold)", color: "var(--gold)", fontSize: 14 }}>
@@ -174,7 +252,12 @@ function Dashboard({ onLogout }) {
         </div>
       )}
 
-      {attention.length > 0 && (
+      {view === "calendar" && (
+        <Calendar entries={entries} month={month} onMonth={setMonth}
+          onSelect={(e) => setManualDraft(e)} />
+      )}
+
+      {view === "list" && attention.length > 0 && (
         <Section title="Requires your attention" accent>
           {attention.map((e) => (
             <EntryCard key={e.id} e={e} highlight onEdit={() => setManualDraft(e)} onDelete={() => remove(e.id)} />
@@ -182,6 +265,7 @@ function Dashboard({ onLogout }) {
         </Section>
       )}
 
+      {view === "list" && (
       <Section title={attention.length ? "On the horizon" : "Everyone"}>
         {loaded && entries.length === 0 && (
           <div style={{ border: "1.5px dashed var(--line)", borderRadius: 14, padding: "40px 24px", textAlign: "center", color: "var(--faded)", fontSize: 14 }}>
@@ -193,17 +277,19 @@ function Dashboard({ onLogout }) {
           <EntryCard key={e.id} e={e} onEdit={() => setManualDraft(e)} onDelete={() => remove(e.id)} />
         ))}
       </Section>
+      )}
 
       <footer style={{ marginTop: 40, textAlign: "right" }}>
-        <button className="linklike" onClick={onLogout}>Sign out</button>
+        <button className="linklike" onClick={() => { api.logout(); onLogout(); }}>Sign out</button>
       </footer>
 
-      {voiceText !== null && (
+      {voiceSeed !== null && (
         <VoiceReview
-          utterance={voiceText}
+          utterance={voiceSeed.utterance}
+          seed={voiceSeed.result}
           onSave={save}
-          onCancel={() => setVoiceText(null)}
-          onEditByHand={(d) => { setVoiceText(null); setManualDraft(d); }}
+          onCancel={() => setVoiceSeed(null)}
+          onEditByHand={(d) => { setVoiceSeed(null); setManualDraft(d); }}
         />
       )}
       {manualDraft !== null && (
@@ -342,7 +428,7 @@ function VoicePanel({ onUtterance, paused }) {
 }
 
 // ============================================================ Voice review — understand, confirm once, auto-save
-function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
+function VoiceReview({ utterance, seed, onSave, onCancel, onEditByHand }) {
   const [draft, setDraft] = useState(null);
   const [phase, setPhase] = useState("thinking"); // thinking | speaking | listening | saving
   const [caption, setCaption] = useState("Understanding…");
@@ -353,7 +439,7 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
 
   const parse = useCallback(async (text, currentDraft) => {
     try {
-      const r = await api.parse(text, currentDraft);
+      const r = await api.assistant(text, currentDraft);
       if (r && !r.fallback) return r;
     } catch { /* fall through to local */ }
     // local heuristic fallback (no ANTHROPIC_API_KEY on server)
@@ -372,8 +458,8 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
   useEffect(() => {
     aliveRef.current = true;
     (async () => {
-      // 1. understand the initial utterance
-      let result = await parse(utterance, null);
+      // 1. understand the initial utterance (or reuse the dashboard's parse)
+      let result = seed || await parse(utterance, null);
       if (!aliveRef.current) return;
 
       let firstPass = true;
@@ -389,12 +475,13 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
 
         // 2. speak — either a single missing-field question, or the summary with auto-save notice
         setPhase("speaking");
+        const conflictLine = result.conflicts?.length ? " " + persona.conflict(result.conflicts.map((c) => c.name)) : "";
         let prompt;
-        if (missing === "name") prompt = persona.askName();
-        else if (missing === "date") prompt = persona.askDate(d.name);
+        if (missing === "name") prompt = result.reply || persona.askName();
+        else if (missing === "date") prompt = result.reply || persona.askDate(d.name);
         else if (result.unclear) prompt = persona.unclear();
-        else if (result.reply && firstPass) prompt = `${result.reply} ${persona.savingSuffix()}`;
-        else prompt = `${persona.confirmPrefix()} ${draftSummary(d)}. ${persona.savingSuffix()}`;
+        else if (result.reply && firstPass) prompt = `${result.reply}${conflictLine} ${persona.savingSuffix()}`;
+        else prompt = `${persona.confirmPrefix()} ${draftSummary(d)}.${conflictLine} ${persona.savingSuffix()}`;
         setCaption(prompt);
         await speak(prompt);
         if (!aliveRef.current) return;
