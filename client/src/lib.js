@@ -37,7 +37,7 @@ export const api = {
   update: (e) => req(`/api/entries/${e.id}`, { method: "PUT", body: JSON.stringify(e) }),
   remove: (id) => req(`/api/entries/${id}`, { method: "DELETE" }),
   testReminder: () => req("/api/reminders/test", { method: "POST" }),
-  assistant: (text, draft) => req("/api/assistant", { method: "POST", body: JSON.stringify({ text, draft }) }),
+  assistant: (text, draft, history) => req("/api/assistant", { method: "POST", body: JSON.stringify({ text, draft, history }) }),
   briefing: () => req("/api/briefing"),
   me: () => req("/api/me"),
   setPhone: (phone) => req("/api/me", { method: "PATCH", body: JSON.stringify({ phone }) }),
@@ -186,6 +186,53 @@ export function speak(text) {
       const keepAlive = setInterval(() => { if (!done) { try { synth.resume(); } catch { /* noop */ } } }, 4000);
       setTimeout(finish, 4500 + text.length * 110);
     } catch { resolve(); }
+  });
+}
+
+// Speak while listening for an interruption ("stop", "wait", "no, make it…").
+// Echo-guard: ignores transcripts that are just the TTS voice leaking into the mic.
+export function speakWithBargeIn(text) {
+  return new Promise((resolve) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { speak(text).then(() => resolve({ heard: null })); return; }
+
+    const norm = (t) => t.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
+    const spokenWords = new Set(norm(text));
+    const STOP = /^(stop|wait|no\b|hold|hang on|cancel|jarvis|actually|excuse me|pause|quiet|one moment|shut)/;
+    const novelCount = (t) => norm(t).filter((w) => !spokenWords.has(w)).length;
+    const qualifies = (t) => STOP.test(t.trim().toLowerCase()) || novelCount(t) >= 3;
+    const stripEcho = (t) => {
+      const ws = t.trim().split(/\s+/);
+      let i = 0;
+      while (i < ws.length && spokenWords.has(ws[i].toLowerCase().replace(/[^a-z0-9']/g, ""))) i++;
+      return ws.slice(i).join(" ").trim() || t.trim();
+    };
+
+    let done = false, interrupted = false, finalBuf = "", interimBuf = "", silenceTimer = null;
+    const rec = new SR();
+    rec.lang = "en-US"; rec.continuous = true; rec.interimResults = true;
+    const finish = (heard) => {
+      if (done) return;
+      done = true;
+      clearTimeout(silenceTimer);
+      try { rec.stop(); } catch { /* noop */ }
+      resolve({ heard: heard || null });
+    };
+    rec.onresult = (ev) => {
+      finalBuf = ""; interimBuf = "";
+      for (const r of ev.results) (r.isFinal ? (finalBuf += r[0].transcript + " ") : (interimBuf += r[0].transcript));
+      const t = (finalBuf + interimBuf).trim();
+      if (!interrupted && t && qualifies(t)) { interrupted = true; stopSpeaking(); }
+      if (interrupted) {
+        clearTimeout(silenceTimer);
+        silenceTimer = setTimeout(() => finish(stripEcho((finalBuf + interimBuf).trim())), 1800);
+      }
+    };
+    rec.onend = () => { if (interrupted && !done) finish(stripEcho((finalBuf + interimBuf).trim())); };
+    try { rec.start(); } catch { /* mic busy: degrade to plain speech */ }
+
+    speak(text).then(() => { if (!interrupted) setTimeout(() => finish(null), 200); });
+    setTimeout(() => { if (!done && !interrupted) finish(null); }, 40000); // absolute cap
   });
 }
 

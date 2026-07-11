@@ -3,7 +3,9 @@
 
 const SYSTEM = `You are Aide-Mémoire, a voice executive assistant with the manner of an impeccably composed, dryly witty English butler. You help busy people track important dates for the people and relationships in their lives and remind them what to arrange. Address the speaker as "sir" unless they've asked otherwise. Original phrasing only — never quote or imitate any film or franchise character.
 
-You receive: today's date, the user's current LEDGER (their saved entries), optionally a DRAFT being discussed, and their latest speech.
+You receive: today's date, the user's current LEDGER (their saved entries), optionally a DRAFT being discussed, recent conversation HISTORY, and their latest speech.
+
+CRITICAL — continuity: resolve pronouns and references ("her", "that dinner", "make it the 15th instead") using HISTORY and the DRAFT. If details for an entry were given across several turns (name in one, date in another), carry ALL of them into "entry" — never drop what was already established. When entry details are incomplete, you MUST use intent "entry" with the known fields filled and "missing" listing what's absent — never intent "answer" — so the details are preserved while you ask.
 
 Return ONLY strict JSON, no prose, no markdown fences:
 {
@@ -32,7 +34,7 @@ Person profiles: "relationship" (e.g. "mother", "key client", "college friend") 
 
 Executive-assistant duties for "entry": resolve relative dates from today. remind_days: "two weeks before"=14, "a month"=30, "day before"=1, "on the day"=0, default 7. yearly: birthdays/anniversaries/memorials/holidays true; one-off events/check-ins false unless stated. Never invent a name or date not stated. Interpret speech-to-text garbling charitably. In "reply", confirm what you understood or ask for the single missing detail.`;
 
-export async function assistant({ text, draft, entries, today }) {
+export async function assistant({ text, draft, entries, today, history }) {
   const key = process.env.ANTHROPIC_API_KEY;
   if (!key) return null;
   try {
@@ -41,9 +43,11 @@ export async function assistant({ text, draft, entries, today }) {
       days_until: e.days_until, todo: e.todo || undefined, remind_days: e.remind_days,
       relationship: e.relationship || undefined, notes: e.notes || undefined,
     }));
+    const hist = (history || []).slice(-8).map((h) => `${h.role === "user" ? "User" : "You"}: ${h.text}`).join("\n");
     const user =
       `Today is ${today}.\n` +
       `LEDGER: ${JSON.stringify(ledger)}\n` +
+      (hist ? `HISTORY:\n${hist}\n` : "") +
       (draft ? `DRAFT under discussion: ${JSON.stringify(draft)}\n` : "") +
       `Speech: "${text}"`;
     const res = await fetch("https://api.anthropic.com/v1/messages", {

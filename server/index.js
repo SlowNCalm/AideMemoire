@@ -133,6 +133,7 @@ app.post("/api/assistant", requireAuth, async (req, res) => {
   const result = await assistant({
     text,
     draft: req.body?.draft || null,
+    history: Array.isArray(req.body?.history) ? req.body.history.slice(-8) : [],
     entries,
     today: todayISO(req.user.timezone),
   });

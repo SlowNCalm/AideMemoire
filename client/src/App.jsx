@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   api, setToken, hasToken, clearToken,
   OCCASIONS, parseUtterance, fmtDate, humanDays,
-  speak, stopSpeaking, draftSummary, parseCorrection, persona, leadPhrase,
+  speak, stopSpeaking, speakWithBargeIn, draftSummary, parseCorrection, persona, leadPhrase,
 } from "./lib.js";
 import Calendar from "./Calendar.jsx";
 
@@ -88,7 +88,7 @@ function Gate({ onEnter }) {
 function Wordmark({ size = 34 }) {
   return (
     <h1 style={{ fontFamily: "var(--serif)", fontWeight: 500, fontSize: size, margin: 0, letterSpacing: "0.02em" }}>
-      Aide-<span style={{ color: "var(--gold)", fontStyle: "italic" }}>Mémoire</span>
+      Aide-<span className="goldword">Mémoire</span>
     </h1>
   );
 }
@@ -150,6 +150,11 @@ function Dashboard({ onLogout }) {
   const [thinking, setThinking] = useState(false);
   const [draftMsg, setDraftMsg] = useState(null);        // {message} from the "draft" intent
   const [showSettings, setShowSettings] = useState(false);
+  const historyRef = useRef([]);                          // rolling conversation memory
+  const remember = (role, text) => {
+    if (!text) return;
+    historyRef.current = [...historyRef.current.slice(-10), { role, text: String(text).slice(0, 300) }];
+  };
   const [toast, setToast] = useState("");
   const toastTimer = useRef();
 
@@ -175,13 +180,14 @@ function Dashboard({ onLogout }) {
     (async () => {
       try {
         const { reply } = await api.briefing();
-        if (reply) { notify(reply); speak(reply); }
+        if (reply) { notify(reply); await speakOut(reply); }
       } catch { /* silent */ }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loaded]);
 
   const save = async (data) => {
+    // returns an error string (form stays open) or null on success
     try {
       const r = data.id ? await api.update(data) : await api.create(data);
       let msg = data.id ? "Saved." : `${data.name} — kept. Email ${data.remind_days === 0 ? "on the day" : `${data.remind_days}d before`}.`;
@@ -191,17 +197,31 @@ function Dashboard({ onLogout }) {
         speak(persona.conflict(names));
       }
       notify(msg);
+      remember("assistant", `Saved: ${data.name}, ${data.occasion}, ${data.date}.`);
       setManualDraft(null); setVoiceSeed(null);
       refresh();
-    } catch (e) { notify(e.message); }
+      return null;
+    } catch (e) {
+      console.error("save failed:", e);
+      notify(e.message === "unauthorized" ? "Your session expired — please log in again." : e.message);
+      return e.message || "Save failed.";
+    }
+  };
+
+  // speak a line; if the user talks over it, treat that as the next command
+  const speakOut = async (line) => {
+    const { heard } = await speakWithBargeIn(line);
+    if (heard) await handleUtterance(heard);
   };
 
   // route every utterance through the assistant
   const handleUtterance = async (text) => {
     setThinking(true);
+    remember("user", text);
     let result = null;
-    try { result = await api.assistant(text, null); } catch { /* offline/401 handled below */ }
+    try { result = await api.assistant(text, null, historyRef.current); } catch { /* offline/401 handled below */ }
     setThinking(false);
+    if (result?.reply) remember("assistant", result.reply);
 
     if (!result || result.fallback) {
       // no AI key on the server — basic local routing
@@ -220,20 +240,20 @@ function Dashboard({ onLogout }) {
         if (result.view) setView(result.view);
         if (result.month) setMonth(result.month);
         if (result.view === "calendar" || result.month) setView("calendar");
-        if (result.reply) speak(result.reply);
+        if (result.reply) await speakOut(result.reply);
         break;
       case "draft":
         if (result.message) setDraftMsg({ message: result.message });
-        if (result.reply) speak(result.reply);
+        if (result.reply) await speakOut(result.reply);
         break;
       case "delete":
         if (result.delete_id) { await api.remove(result.delete_id).catch(() => {}); refresh(); }
-        if (result.reply) { speak(result.reply); notify(result.reply); }
+        if (result.reply) { notify(result.reply); await speakOut(result.reply); }
         break;
       case "answer":
       case "none":
       default:
-        if (result.reply) { speak(result.reply); notify(result.reply); }
+        if (result.reply) { notify(result.reply); await speakOut(result.reply); }
         break;
     }
   };
@@ -361,7 +381,7 @@ const WAKE_RE = /\b(?:hey|hay|ok|okay)?[\s,]*(?:jarvis|jarvus|jervis|jarves|trav
 function VoicePanel({ onUtterance, paused }) {
   const [supported] = useState(() => !!(window.SpeechRecognition || window.webkitSpeechRecognition));
   const [listening, setListening] = useState(false);
-  const [handsFree, setHandsFree] = useState(false);
+  const [handsFree, setHandsFree] = useState(true); // Jarvis is on by default
   const [transcript, setTranscript] = useState("");
   const [micError, setMicError] = useState("");
   const sessionRef = useRef(null);
@@ -408,7 +428,13 @@ function VoicePanel({ onUtterance, paused }) {
         setTranscript("");
         command = (follow.text || "").replace(WAKE_RE, "").trim();
       }
-      if (command) { onUtterance(command); break; } // review opens; loop resumes when it closes
+      if (command) {
+        // wait for the assistant to handle it; if no modal opened (a question,
+        // a view change), keep listening — don't leave the user in silence
+        try { await onUtterance(command); } catch { /* keep listening regardless */ }
+        while (window.speechSynthesis?.speaking) await new Promise((r) => setTimeout(r, 200));
+        if (pausedRef.current || !handsFreeRef.current) break;
+      }
     }
     sessionRef.current = null;
   }, [onUtterance]);
@@ -417,6 +443,12 @@ function VoicePanel({ onUtterance, paused }) {
   useEffect(() => {
     if (!paused && handsFreeRef.current) startSession();
   }, [paused, startSession]);
+
+  // Jarvis stands by from the moment the dashboard opens
+  useEffect(() => {
+    if (supported && handsFreeRef.current) startSession();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const toggle = () => {
     if (listening) { setHandsFree(false); /* session ends itself on silence */ }
@@ -524,19 +556,31 @@ function VoiceReview({ utterance, seed, onSave, onCancel, onEditByHand }) {
         else if (result.reply && firstPass) prompt = `${result.reply}${conflictLine} ${persona.savingSuffix()}`;
         else prompt = `${persona.confirmPrefix()} ${draftSummary(d)}.${conflictLine} ${persona.savingSuffix()}`;
         setCaption(prompt);
-        await speak(prompt);
+        const { heard: barge } = await speakWithBargeIn(prompt);
         if (!aliveRef.current) return;
 
-        // 3. listen: short grace window on a complete summary, generous window for answers
-        setPhase("listening");
-        setHeard("");
-        const { text } = await listenUntilSilence({
-          silenceMs: 2000,
-          maxMs: 30000,
-          noSpeechMs: missing || result.unclear ? 10000 : 3500, // 3.5s of silence on a summary = consent
-          onPartial: setHeard,
-        });
-        if (!aliveRef.current) return;
+        // 3. if they interrupted, that IS the reply; otherwise listen —
+        // short grace window on a complete summary, generous for answers
+        let text = barge;
+        if (!text) {
+          setPhase("listening");
+          setHeard("");
+          ({ text } = await listenUntilSilence({
+            silenceMs: 2000,
+            maxMs: 30000,
+            noSpeechMs: missing || result.unclear ? 10000 : 3500, // 3.5s of silence on a summary = consent
+            onPartial: setHeard,
+          }));
+          if (!aliveRef.current) return;
+        }
+        // a bare "stop"/"wait" interruption means: don't save yet, await instruction
+        if (text && /^(stop|wait|hold on|hang on|one moment|pause)[.!]?$/i.test(text.trim())) {
+          setCaption("Paused, sir. What shall I change?");
+          await speak("Paused, sir. What shall I change?");
+          setPhase("listening"); setHeard("");
+          ({ text } = await listenUntilSilence({ silenceMs: 2000, maxMs: 30000, noSpeechMs: 12000, onPartial: setHeard }));
+          if (!aliveRef.current) return;
+        }
 
         if (!text) {
           if (!missing && !result.unclear) break; // silence after summary → save
@@ -597,6 +641,7 @@ function VoiceReview({ utterance, seed, onSave, onCancel, onEditByHand }) {
 
         <div style={{ marginTop: 18, minHeight: 40, fontSize: 14, color: phase === "listening" ? "var(--gold)" : "var(--faded)", fontStyle: "italic" }}>
           {phase === "listening" ? (heard || caption) : caption}
+          {phase === "speaking" && <div style={{ fontSize: 11, marginTop: 4, opacity: 0.7 }}>You can interrupt me at any time.</div>}
         </div>
 
         <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 20 }}>
@@ -711,7 +756,19 @@ function EntryForm({ initial, onCancel, onSubmit }) {
   const [remind, setRemind] = useState(initial.remind_days ?? 7);
   const [relationship, setRelationship] = useState(initial.relationship || "");
   const [notes, setNotes] = useState(initial.notes || "");
-  const valid = name.trim() && date;
+  const [saving, setSaving] = useState(false);
+  const [formErr, setFormErr] = useState("");
+  const valid = name.trim() && date && !saving;
+  const submit = async () => {
+    setSaving(true); setFormErr("");
+    const err = await onSubmit({
+      id: initial.id, name: name.trim(), occasion, date, yearly,
+      todo: todo.trim(), remind_days: remind,
+      relationship: relationship.trim(), notes: notes.trim(),
+    });
+    setSaving(false);
+    if (err) setFormErr(err);
+  };
 
   const label = { display: "block", fontSize: 11, fontWeight: 600, color: "var(--faded)", textTransform: "uppercase", letterSpacing: "0.08em", margin: "18px 0 7px" };
 
@@ -772,15 +829,11 @@ function EntryForm({ initial, onCancel, onSubmit }) {
           <option value={30}>1 month before</option>
         </select>
 
+        {formErr && <p style={{ color: "var(--red)", fontSize: 13, margin: "14px 0 0" }}>{formErr}</p>}
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 26 }}>
           <button className="btn quiet" onClick={onCancel}>Cancel</button>
-          <button className="btn" disabled={!valid}
-            onClick={() => onSubmit({
-              id: initial.id, name: name.trim(), occasion, date, yearly,
-              todo: todo.trim(), remind_days: remind,
-              relationship: relationship.trim(), notes: notes.trim(),
-            })}>
-            {initial.id ? "Save changes" : "Keep this date"}
+          <button className="btn" disabled={!valid} onClick={submit}>
+            {saving ? "Saving…" : initial.id ? "Save changes" : "Keep this date"}
           </button>
         </div>
       </div>

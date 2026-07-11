@@ -21,6 +21,15 @@ body {
   color: var(--ink);
   font-family: var(--sans);
   -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  background-image:
+    radial-gradient(ellipse 900px 500px at 15% -5%, rgba(198, 161, 91, 0.10), transparent 60%),
+    radial-gradient(ellipse 700px 480px at 90% 8%, rgba(198, 161, 91, 0.05), transparent 60%),
+    radial-gradient(ellipse 800px 600px at 50% 110%, rgba(120, 90, 40, 0.07), transparent 65%),
+    linear-gradient(rgba(198,161,91,0.022) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(198,161,91,0.022) 1px, transparent 1px);
+  background-size: auto, auto, auto, 44px 44px, 44px 44px;
+  background-attachment: fixed;
 }
 
 input, select, textarea, button { font-family: var(--sans); }
@@ -47,9 +56,12 @@ input[type="date"] { color-scheme: dark; }
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
-  background: var(--gold);
+  background: linear-gradient(180deg, #d8b76e, var(--gold) 55%, #a8853f);
   color: #16130d;
+  box-shadow: 0 2px 10px rgba(198,161,91,0.25);
+  transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.2s ease;
 }
+.btn:not(:disabled):hover { transform: translateY(-1px); box-shadow: 0 4px 16px rgba(198,161,91,0.4); filter: brightness(1.05); }
 .btn.ghost {
   background: transparent;
   color: var(--gold);
@@ -69,20 +81,35 @@ input[type="date"] { color-scheme: dark; }
 
 /* ---------- the voice orb (signature element) ---------- */
 .orb {
-  width: 84px; height: 84px; border-radius: 50%;
-  border: 1px solid var(--gold);
-  background: radial-gradient(circle at 35% 30%, rgba(198,161,91,0.35), rgba(198,161,91,0.06) 65%);
+  position: relative;
+  width: 88px; height: 88px; border-radius: 50%;
+  border: 1px solid rgba(198,161,91,0.7);
+  background:
+    radial-gradient(circle at 35% 28%, rgba(255,235,190,0.35), transparent 42%),
+    radial-gradient(circle at 50% 55%, rgba(198,161,91,0.30), rgba(198,161,91,0.05) 70%);
   color: var(--gold);
   font-size: 26px;
   cursor: pointer;
   display: flex; align-items: center; justify-content: center;
-  transition: transform 0.15s ease;
+  transition: transform 0.15s ease, box-shadow 0.3s ease;
+  box-shadow: 0 0 18px rgba(198,161,91,0.15), 0 0 2px rgba(198,161,91,0.5) inset;
 }
-.orb:hover { transform: scale(1.04); }
+.orb::before {
+  content: "";
+  position: absolute; inset: -7px;
+  border-radius: 50%;
+  border: 1px dashed rgba(198,161,91,0.35);
+  animation: orb-spin 24s linear infinite;
+}
+.orb:hover { transform: scale(1.05); box-shadow: 0 0 28px rgba(198,161,91,0.3), 0 0 2px rgba(198,161,91,0.6) inset; }
 .orb.listening {
   animation: orb-pulse 1.6s ease-in-out infinite;
-  background: radial-gradient(circle at 35% 30%, rgba(198,161,91,0.6), rgba(198,161,91,0.12) 65%);
+  background:
+    radial-gradient(circle at 35% 28%, rgba(255,235,190,0.55), transparent 45%),
+    radial-gradient(circle at 50% 55%, rgba(198,161,91,0.55), rgba(198,161,91,0.12) 70%);
 }
+.orb.listening::before { animation-duration: 5s; border-style: solid; }
+@keyframes orb-spin { to { transform: rotate(360deg); } }
 @keyframes orb-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(198, 161, 91, 0.35); }
   50% { box-shadow: 0 0 0 22px rgba(198, 161, 91, 0); }
@@ -92,9 +119,16 @@ input[type="date"] { color-scheme: dark; }
 }
 
 .card {
-  background: var(--panel);
+  background: linear-gradient(160deg, rgba(255,255,255,0.028), rgba(255,255,255,0) 45%), var(--panel);
   border: 1px solid var(--line);
   border-radius: 12px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.03) inset, 0 8px 28px rgba(0,0,0,0.35);
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+  backdrop-filter: blur(6px);
+}
+.card:hover {
+  border-color: rgba(198,161,91,0.4);
+  box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 10px 34px rgba(0,0,0,0.45), 0 0 24px rgba(198,161,91,0.06);
 }
 
 .chip {
@@ -104,3 +138,21 @@ input[type="date"] { color-scheme: dark; }
 
 .fadein { animation: fadein 0.25s ease; }
 @keyframes fadein { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; } }
+
+
+/* wordmark shimmer */
+.wordmark em, .wordmark span { position: relative; }
+h1 .goldword {
+  background: linear-gradient(100deg, var(--gold) 30%, #f0dcae 50%, var(--gold) 70%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shimmer 6s ease-in-out infinite;
+  font-style: italic;
+}
+@keyframes shimmer { 0%, 100% { background-position: 0% 0; } 50% { background-position: 100% 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .orb::before { animation: none; }
+  h1 .goldword { animation: none; }
+}
