@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   api, setToken, hasToken, clearToken,
   OCCASIONS, parseUtterance, fmtDate, humanDays,
+  speak, stopSpeaking, draftSummary, parseCorrection,
 } from "./lib.js";
 
 // ============================================================ App shell
@@ -125,7 +126,7 @@ function Dashboard({ onLogout }) {
         </div>
       </header>
 
-      <VoicePanel onDraft={(d) => setDraft(d)} />
+      <VoicePanel onDraft={(d) => setDraft(d)} paused={draft !== null} />
 
       {toast && (
         <div className="card fadein" style={{ padding: "12px 16px", margin: "0 0 20px", borderColor: "var(--gold)", color: "var(--gold)", fontSize: 14 }}>
@@ -157,7 +158,15 @@ function Dashboard({ onLogout }) {
         <button className="linklike" onClick={onLogout}>Sign out</button>
       </footer>
 
-      {draft !== null && (
+      {draft !== null && draft._fromVoice && !draft._manual && (
+        <VoiceReview
+          initial={draft}
+          onSave={save}
+          onCancel={() => setDraft(null)}
+          onEditByHand={(d) => setDraft({ ...d, _manual: true })}
+        />
+      )}
+      {draft !== null && (!draft._fromVoice || draft._manual) && (
         <EntryForm initial={draft} onCancel={() => setDraft(null)} onSubmit={save} />
       )}
     </div>
@@ -179,7 +188,7 @@ function Section({ title, accent, children }) {
 }
 
 // ============================================================ Voice panel
-function VoicePanel({ onDraft }) {
+function VoicePanel({ onDraft, paused }) {
   const [supported, setSupported] = useState(true);
   const [listening, setListening] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
@@ -188,6 +197,15 @@ function VoicePanel({ onDraft }) {
   const recRef = useRef(null);
   const handsFreeRef = useRef(false);
   handsFreeRef.current = handsFree;
+  const pausedRef = useRef(false);
+  pausedRef.current = paused;
+
+  useEffect(() => {
+    const rec = recRef.current;
+    if (!rec) return;
+    if (paused) { try { rec.abort(); } catch { /* noop */ } setListening(false); }
+    else if (handsFreeRef.current) { try { rec.start(); setListening(true); } catch { /* noop */ } }
+  }, [paused]);
 
   useEffect(() => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -221,7 +239,7 @@ function VoicePanel({ onDraft }) {
     rec.onend = () => {
       setListening(false);
       // hands-free: resume listening automatically
-      if (handsFreeRef.current) {
+      if (handsFreeRef.current && !pausedRef.current) {
         try { rec.start(); setListening(true); } catch { /* already started */ }
       }
     };
@@ -317,6 +335,151 @@ function EntryCard({ e, highlight, onEdit, onDelete }) {
               ? <button className="linklike" onClick={() => setConfirm(true)}>Delete</button>
               : <button className="linklike" style={{ color: "var(--red)", fontWeight: 700 }} onClick={onDelete}>Confirm?</button>}
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================ Voice review (hands-free confirm)
+function VoiceReview({ initial, onSave, onCancel, onEditByHand }) {
+  const [draft, setDraft] = useState(() => {
+    const { _fromVoice, _manual, _transcript, ...d } = initial;
+    return d;
+  });
+  const [phase, setPhase] = useState("speaking"); // speaking | listening | done
+  const [caption, setCaption] = useState("");
+  const [heard, setHeard] = useState("");
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const aliveRef = useRef(true);
+  const recRef = useRef(null);
+
+  const listenOnce = useCallback(() => new Promise((resolve) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return resolve("");
+    const rec = new SR();
+    recRef.current = rec;
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    let final = "";
+    let settled = false;
+    const finish = () => { if (!settled) { settled = true; resolve(final.trim()); } };
+    rec.onresult = (ev) => {
+      let interim = "";
+      for (const r of ev.results) (r.isFinal ? (final += r[0].transcript) : (interim += r[0].transcript));
+      setHeard(final || interim);
+    };
+    rec.onerror = finish;
+    rec.onend = finish;
+    try { rec.start(); } catch { finish(); }
+    setTimeout(() => { try { rec.stop(); } catch { /* noop */ } }, 9000);
+  }), []);
+
+  const say = useCallback(async (text) => {
+    setPhase("speaking");
+    setCaption(text);
+    await speak(text);
+  }, []);
+
+  // main conversation loop
+  useEffect(() => {
+    aliveRef.current = true;
+    (async () => {
+      let opener = null; // a question about a missing field, or the summary
+      while (aliveRef.current) {
+        const d = draftRef.current;
+        const missing = !d.name ? "name" : !d.date ? "date" : null;
+
+        if (opener) await say(opener);
+        else if (missing === "name") await say(`I got the date but not the person. Who is this for?`);
+        else if (missing === "date") await say(`I have ${d.name}, but no date. When is it?`);
+        else await say(`${draftSummary(d)}. Shall I keep it?`);
+        if (!aliveRef.current) return;
+        opener = null;
+
+        setPhase("listening");
+        setHeard("");
+        const reply = await listenOnce();
+        if (!aliveRef.current) return;
+
+        if (!reply) { opener = "I didn't catch that. You can say yes, cancel, or a correction."; continue; }
+
+        // bare answers to a missing-field question
+        if (missing === "name" && reply.split(" ").length <= 4 && !/\d/.test(reply)) {
+          const name = reply.replace(/^(it'?s |for |my )/i, "").trim();
+          setDraft((p) => ({ ...p, name: name.charAt(0).toUpperCase() + name.slice(1) }));
+          continue;
+        }
+
+        const result = parseCorrection(reply, draftRef.current);
+        if (result.action === "save") {
+          const final = draftRef.current;
+          if (!final.name || !final.date) { opener = "One more thing first."; continue; }
+          aliveRef.current = false;
+          setPhase("done");
+          await speak(`Kept. I'll email you ${final.remind_days === 0 ? "on the day" : "before"}.`);
+          onSave(final);
+          return;
+        }
+        if (result.action === "cancel") {
+          aliveRef.current = false;
+          stopSpeaking();
+          await speak("Discarded.");
+          onCancel();
+          return;
+        }
+        if (result.action === "edit") { aliveRef.current = false; stopSpeaking(); onEditByHand(draftRef.current); return; }
+        if (result.action === "update") {
+          setDraft(result.draft);
+          opener = null; // loop re-reads the updated summary
+          continue;
+        }
+        opener = "Sorry, I didn't get that. Say yes to keep it, or tell me what to change — the name, the date, the reminder, or the note.";
+      }
+    })();
+    return () => {
+      aliveRef.current = false;
+      stopSpeaking();
+      try { recRef.current?.abort(); } catch { /* noop */ }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const occ = OCCASIONS.find((o) => o.id === draft.occasion) || { emoji: "📌", label: "Date" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(10,9,7,0.78)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
+      <div className="card fadein" style={{ padding: 28, width: "100%", maxWidth: 480, background: "var(--bg)", textAlign: "center" }}>
+        <div className={"orb" + (phase === "listening" ? " listening" : "")}
+          style={{ margin: "0 auto 18px", cursor: "default" }} aria-hidden="true">
+          {phase === "listening" ? "◉" : "🔊"}
+        </div>
+
+        <div style={{ fontFamily: "var(--serif)", fontSize: 24, fontWeight: 600 }}>
+          {occ.emoji} {draft.name || "—"}
+        </div>
+        <div style={{ color: "var(--faded)", fontSize: 14, marginTop: 4 }}>
+          {occ.label}{draft.date ? ` · ${fmtDate(draft.date)}` : " · date needed"}
+          {" · "}{draft.remind_days === 0 ? "reminder on the day" : `reminder ${draft.remind_days}d before`}
+        </div>
+        {draft.todo && (
+          <div style={{ fontSize: 14, marginTop: 12, padding: "9px 13px", background: "var(--panel-2)", borderRadius: 8, borderLeft: "2px solid var(--gold)", textAlign: "left" }}>
+            {draft.todo}
+          </div>
+        )}
+
+        <div style={{ marginTop: 18, minHeight: 40, fontSize: 14, color: phase === "listening" ? "var(--gold)" : "var(--faded)", fontStyle: "italic" }}>
+          {phase === "listening" ? (heard || "Listening… say yes, a correction, or cancel.") : caption}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 20 }}>
+          <button className="btn quiet" onClick={() => { aliveRef.current = false; stopSpeaking(); onCancel(); }}>Cancel</button>
+          <button className="btn ghost" onClick={() => { aliveRef.current = false; stopSpeaking(); onEditByHand(draftRef.current); }}>Edit by hand</button>
+          <button className="btn" disabled={!draft.name || !draft.date}
+            onClick={() => { aliveRef.current = false; stopSpeaking(); onSave(draftRef.current); }}>
+            Keep it
+          </button>
         </div>
       </div>
     </div>
