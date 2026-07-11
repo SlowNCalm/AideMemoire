@@ -137,3 +137,111 @@ export function humanDays(d) {
   if (d === 1) return "tomorrow";
   return `in ${d} days`;
 }
+
+// ---------------- voice conversation helpers ----------------
+export function speak(text) {
+  return new Promise((resolve) => {
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1.02;
+      u.onend = resolve;
+      u.onerror = resolve;
+      window.speechSynthesis.speak(u);
+      // safety: resolve even if onend never fires
+      setTimeout(resolve, Math.min(12000, 350 + text.length * 65));
+    } catch { resolve(); }
+  });
+}
+
+export function stopSpeaking() {
+  try { window.speechSynthesis.cancel(); } catch { /* noop */ }
+}
+
+// Spoken summary of a draft, plus the question
+export function draftSummary(d) {
+  const occ = OCCASIONS.find((o) => o.id === d.occasion);
+  const parts = [];
+  parts.push(`${d.name || "someone"} — ${occ ? occ.label.toLowerCase() : "date"}`);
+  if (d.date) parts.push(`on ${spokenDate(d.date)}`);
+  parts.push(d.remind_days === 0 ? "reminder on the day" : `reminder ${spokenLead(d.remind_days)} before`);
+  if (d.todo) parts.push(`to ${d.todo}`);
+  return parts.join(", ");
+}
+function spokenDate(iso) {
+  const [y, m, day] = iso.split("-").map(Number);
+  return new Date(y, m - 1, day).toLocaleDateString("en-US", { month: "long", day: "numeric" });
+}
+function spokenLead(days) {
+  if (days % 30 === 0 && days >= 30) return days === 30 ? "one month" : `${days / 30} months`;
+  if (days % 7 === 0 && days >= 7) return days === 7 ? "one week" : `${days / 7} weeks`;
+  return days === 1 ? "one day" : `${days} days`;
+}
+
+// Interpret a spoken reply during review. Returns:
+//  { action: "save" } | { action: "cancel" } | { action: "edit" }
+//  | { action: "update", draft, changed: [fields] }
+//  | { action: "unclear" }
+export function parseCorrection(text, draft) {
+  const t = " " + text.trim() + " ";
+  const lower = t.toLowerCase().trim();
+
+  if (/^(yes|yeah|yep|yup|correct|confirm|confirmed|save|save it|keep it|keep|that's right|that is right|perfect|sounds good|good|done|ok|okay)\b/.test(lower))
+    return { action: "save" };
+  if (/^(no |cancel|discard|never mind|nevermind|forget it|scrap|stop|delete)/.test(lower) && lower.split(" ").length <= 3)
+    return { action: "cancel" };
+  if (/\b(edit by hand|type it|manual|let me type|open the form)\b/.test(lower))
+    return { action: "edit" };
+
+  const next = { ...draft };
+  const changed = [];
+
+  // name: "the name is X" / "it's for X" / "change the name to X" / "call it X"
+  const nameM =
+    t.match(/\b(?:the name is|name is|it'?s for|change (?:the )?name to|make it for|for)\s+([A-Za-z][\w' ]{0,40}?)(?=[,.!]|$)/i);
+  if (nameM && !/^(the|a|an)\b/i.test(nameM[1])) {
+    next.name = nameM[1].trim().replace(/^my /i, "");
+    next.name = next.name.charAt(0).toUpperCase() + next.name.slice(1);
+    changed.push("name");
+  }
+
+  // occasion
+  for (const o of OCCASIONS) {
+    if (o.words.some((w) => lower.includes(w))) {
+      if (next.occasion !== o.id) { next.occasion = o.id; next.yearly = o.yearly; changed.push("occasion"); }
+      break;
+    }
+  }
+
+  // reminder lead ("remind me two weeks before", "make the reminder 3 days")
+  const numWords = { a: 1, an: 1, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
+  const lead = lower.match(/remind(?:er)?(?: me)?[^.]*?(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten)\s*(day|week|month)s?/);
+  if (lead) {
+    const n = numWords[lead[1]] ?? (Number(lead[1]) || 1);
+    next.remind_days = n * (lead[2] === "week" ? 7 : lead[2] === "month" ? 30 : 1);
+    changed.push("reminder");
+  } else if (/remind(?:er)?(?: me)? on the day|day of/.test(lower)) {
+    next.remind_days = 0; changed.push("reminder");
+  }
+
+  // to-do: "the note is …" / "to do is …" / "remind me to …" / "have them …"
+  const todoM =
+    t.match(/\b(?:the note is|note is|to[- ]do is|the task is|task is|remind me to|i need to|i should)\s+(.+?)(?:[.!]|$)/i);
+  if (todoM) { next.todo = todoM[1].trim(); changed.push("to-do"); }
+
+  // date: any parseable date in the utterance (checked last, and only if the
+  // phrase actually looks date-like, so "remind me two weeks before" doesn't parse)
+  if (!changed.includes("reminder") || /\bon\b|january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|\d{1,2}(st|nd|rd|th)/.test(lower)) {
+    const results = chrono.parse(t, new Date(), { forwardDate: true });
+    if (results.length > 0 && /january|february|march|april|may|june|july|august|september|october|november|december|monday|tuesday|wednesday|thursday|friday|saturday|sunday|tomorrow|next |\d/.test(results[0].text.toLowerCase())) {
+      const d = results[0].start.date();
+      const pad = (n) => String(n).padStart(2, "0");
+      const iso = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+      if (iso !== draft.date) { next.date = iso; changed.push("date"); }
+    }
+  }
+
+  // bare short answer while a field is missing (handled by caller passing expectField)
+  if (changed.length === 0) return { action: "unclear" };
+  return { action: "update", draft: next, changed };
+}
