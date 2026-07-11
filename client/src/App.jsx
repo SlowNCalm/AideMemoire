@@ -28,6 +28,7 @@ function Gate({ onEnter }) {
     try {
       const r = mode === "login" ? await api.login(email, password) : await api.signup(email, password, invite);
       setToken(r.token);
+      speak(persona.greet()); // also unlocks browser audio for the session
       onEnter();
     } catch (e) { setErr(e.message || "Something went wrong."); }
     finally { setBusy(false); }
@@ -226,6 +227,7 @@ function Dashboard({ onLogout }) {
           </p>
         </div>
         <div style={{ display: "flex", gap: 10 }}>
+          <button className="btn quiet" title="Test the voice" onClick={() => speak(persona.voiceCheck())}>🔊 Voice</button>
           <button className="btn quiet" onClick={testEmail}>Send test email</button>
           <button className="btn ghost" onClick={() => setManualDraft({})}>+ Add by hand</button>
         </div>

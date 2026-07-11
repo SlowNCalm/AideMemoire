@@ -161,19 +161,27 @@ try { window.speechSynthesis.onvoiceschanged = () => { cachedVoice = null; pickV
 export function speak(text) {
   return new Promise((resolve) => {
     try {
-      window.speechSynthesis.cancel();
+      const synth = window.speechSynthesis;
+      synth.cancel();
       const u = new SpeechSynthesisUtterance(text);
       const v = pickVoice();
       if (v) u.voice = v;
       u.rate = 0.98;
       u.pitch = 0.92;
-      let done = false;
-      const finish = () => { if (!done) { done = true; setTimeout(resolve, 350); } }; // gap so the mic never hears the tail of the voice
+      let done = false, started = false;
+      const finish = () => { if (!done) { done = true; clearInterval(keepAlive); setTimeout(resolve, 350); } };
+      u.onstart = () => { started = true; };
       u.onend = finish;
       u.onerror = finish;
-      window.speechSynthesis.speak(u);
-      // generous safety net only for browsers where onend never fires
-      setTimeout(finish, 3000 + text.length * 110);
+      // Chrome quirks: cancel() immediately before speak() can silently swallow
+      // the utterance, and long speech can auto-pause. Delay slightly, nudge
+      // with resume(), and retry once if speech never starts.
+      setTimeout(() => { try { synth.speak(u); synth.resume(); } catch { finish(); } }, 80);
+      setTimeout(() => {
+        if (!started && !done) { try { synth.cancel(); synth.speak(u); synth.resume(); } catch { finish(); } }
+      }, 900);
+      const keepAlive = setInterval(() => { if (!done) { try { synth.resume(); } catch { /* noop */ } } }, 4000);
+      setTimeout(finish, 4500 + text.length * 110);
     } catch { resolve(); }
   });
 }
@@ -291,6 +299,14 @@ persona.conflict = (names) => {
     `A word of caution: that coincides with ${list}, sir.`,
     `Mind the calendar, sir — ${list} lands on the same day.`,
   ];
+  return opts[Math.floor(Math.random() * opts.length)];
+};
+persona.greet = () => {
+  const opts = ["At your service, sir.", "Good day, sir. The ledger awaits.", "Welcome back, sir."];
+  return opts[Math.floor(Math.random() * opts.length)];
+};
+persona.voiceCheck = () => {
+  const opts = ["You shall hear me perfectly well, sir.", "Loud and clear, sir.", "The voice is in working order, sir."];
   return opts[Math.floor(Math.random() * opts.length)];
 };
 persona.showCalendar = () => "The calendar, sir.";
