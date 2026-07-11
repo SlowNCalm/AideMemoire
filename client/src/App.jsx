@@ -228,6 +228,9 @@ function Section({ title, accent, children }) {
 }
 
 // ============================================================ Voice panel (capture)
+// Wake word (hands-free mode only). Tolerant of common speech-to-text mishears.
+const WAKE_RE = /\b(?:hey|hay|ok|okay)?[\s,]*(?:jarvis|jarvus|jervis|jarves|travis|davis)\b[,.!]?\s*/i;
+
 function VoicePanel({ onUtterance, paused }) {
   const [supported] = useState(() => !!(window.SpeechRecognition || window.webkitSpeechRecognition));
   const [listening, setListening] = useState(false);
@@ -241,20 +244,46 @@ function VoicePanel({ onUtterance, paused }) {
   pausedRef.current = paused;
 
   const startSession = useCallback(async () => {
-    if (sessionRef.current || pausedRef.current) return;
-    setMicError("");
-    setListening(true);
+    if (sessionRef.current) return;
     sessionRef.current = true;
-    const { text, supported: ok } = await listenUntilSilence({
-      silenceMs: 2200, maxMs: 60000, noSpeechMs: 12000,
-      onPartial: setTranscript,
-    });
+    setMicError("");
+
+    // Hands-free: listen forever, but only act on "Hey Jarvis …"
+    while (!pausedRef.current) {
+      setListening(true);
+      const { text, supported: ok } = await listenUntilSilence({
+        silenceMs: 2200, maxMs: 60000,
+        noSpeechMs: handsFreeRef.current ? 60000 : 12000, // patient while standing by
+        onPartial: setTranscript,
+      });
+      setListening(false);
+      setTranscript("");
+      if (!ok) { setMicError("Microphone unavailable. Allow mic access for this site, then try again."); break; }
+
+      if (!handsFreeRef.current) {
+        // tap-to-talk: the tap was the signal, no wake word needed
+        if (text) onUtterance(text);
+        break;
+      }
+
+      // hands-free: require the wake word
+      const m = text.match(WAKE_RE);
+      if (!m) continue; // not addressed to us — keep standing by
+
+      let command = text.slice(m.index + m[0].length).trim();
+      if (!command) {
+        // "Hey Jarvis." on its own → acknowledge and take the next sentence as the command
+        await speak("Yes?");
+        if (pausedRef.current) break;
+        setListening(true);
+        const follow = await listenUntilSilence({ silenceMs: 2200, maxMs: 60000, noSpeechMs: 10000, onPartial: setTranscript });
+        setListening(false);
+        setTranscript("");
+        command = (follow.text || "").replace(WAKE_RE, "").trim();
+      }
+      if (command) { onUtterance(command); break; } // review opens; loop resumes when it closes
+    }
     sessionRef.current = null;
-    setListening(false);
-    setTranscript("");
-    if (!ok) { setMicError("Microphone unavailable. Allow mic access for this site, then try again."); return; }
-    if (text) onUtterance(text);
-    else if (handsFreeRef.current && !pausedRef.current) startSession(); // keep waiting in hands-free
   }, [onUtterance]);
 
   // resume hands-free listening when a review closes
@@ -292,17 +321,21 @@ function VoicePanel({ onUtterance, paused }) {
       </button>
       <div style={{ flex: 1, minWidth: 220 }}>
         <div style={{ fontFamily: "var(--serif)", fontSize: 19, fontStyle: transcript ? "normal" : "italic", color: transcript ? "var(--ink)" : "var(--faded)" }}>
-          {transcript || (listening ? "Listening — take your time, I'll wait for a pause." : "Tap the orb and speak — name, occasion, date, and what to arrange.")}
+          {transcript || (listening
+            ? (handsFree ? 'Standing by — say "Hey Jarvis" followed by your request.' : "Listening — take your time, I'll wait for a pause.")
+            : "Tap the orb and speak — name, occasion, date, and what to arrange.")}
         </div>
         {micError
           ? <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{micError}</div>
           : <div style={{ fontSize: 12, color: "var(--faded)", marginTop: 6 }}>
-              e.g. "James's board dinner is October 4th — remind me a week before to reserve the private room."
+              {handsFree
+                ? 'e.g. "Hey Jarvis, James\'s board dinner is October 4th — remind me a week before to reserve the private room."'
+                : 'e.g. "James\'s board dinner is October 4th — remind me a week before to reserve the private room."'}
             </div>}
       </div>
       <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: handsFree ? "var(--gold)" : "var(--faded)", cursor: "pointer" }}>
         <input type="checkbox" style={{ width: "auto" }} checked={handsFree} onChange={toggleHandsFree} />
-        Hands-free
+        Hands-free · "Hey Jarvis"
       </label>
     </div>
   );
