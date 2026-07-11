@@ -66,6 +66,7 @@ For live-reload frontend work: `npm start` in one terminal, `cd client && npm ru
 | `REMINDER_EMAIL_FROM` | no | Sender. Default `Aide-Mémoire <onboarding@resend.dev>` (works only to your own Resend account email until you verify a domain). |
 | `TIMEZONE` | no | IANA timezone for "today" and the cron hour. Default `America/Toronto`. |
 | `CRON_EXPR` | no | Sweep schedule. Default `0 8 * * *` (8:00 AM daily). |
+| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_FROM` | no | Set all three (from twilio.com) to also send reminders by SMS to users who add a phone number in Settings. |
 | `CRON_SECRET` | no | Key for the external `/api/reminders/run` trigger. |
 | `APP_SECRET` | no | Signs session tokens. Set it so logins survive server restarts. |
 | `DATA_DIR` | no | Where the SQLite file lives. `/var/data` on Render. |

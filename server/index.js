@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 import cron from "node-cron";
 import { Entries, Users, Sessions } from "./db.js";
 import { runReminderSweep, nextOccurrence, daysUntil, findConflicts, todayISO } from "./reminders.js";
-import { assistant } from "./llm.js";
+import { assistant, briefing } from "./llm.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -66,7 +66,20 @@ function requireAuth(req, res, next) {
   next();
 }
 
-app.get("/api/me", requireAuth, (req, res) => res.json({ email: req.user.email }));
+app.get("/api/me", requireAuth, (req, res) => res.json({ email: req.user.email, phone: req.user.phone || "" }));
+app.patch("/api/me", requireAuth, (req, res) => {
+  const phone = String(req.body?.phone || "").replace(/[^\d+]/g, "").slice(0, 20);
+  Users.setPhone(req.user.id, phone);
+  res.json({ ok: true, phone });
+});
+
+app.get("/api/briefing", requireAuth, async (req, res) => {
+  const entries = Entries.forUser(req.user.id).map(enrich);
+  const tz = req.user.timezone || process.env.TIMEZONE || "America/Toronto";
+  const hour = Number(new Intl.DateTimeFormat("en-US", { hour: "numeric", hour12: false, timeZone: tz }).format(new Date()));
+  const reply = await briefing({ entries, today: todayISO(tz), hour });
+  res.json({ reply });
+});
 
 // ---------- entries ----------
 const enrich = (e) => ({ ...e, yearly: !!e.yearly, next_occurrence: nextOccurrence(e), days_until: daysUntil(e) });
@@ -85,6 +98,8 @@ function cleanEntry(body, id, userId) {
     date, yearly: body.yearly ? 1 : 0,
     todo: String(body.todo || "").trim().slice(0, 500),
     remind_days: Math.max(0, Math.min(90, Number(body.remind_days) || 0)),
+    relationship: String(body.relationship || "").trim().slice(0, 80),
+    notes: String(body.notes || "").trim().slice(0, 1000),
   };
 }
 

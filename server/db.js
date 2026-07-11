@@ -40,10 +40,14 @@ db.exec(`
   );
 `);
 
-// migration: single-user era entries have no user_id column value
-try { db.exec("ALTER TABLE entries ADD COLUMN user_id TEXT"); } catch { /* already there */ }
+// migrations (each is a no-op if the column already exists)
+try { db.exec("ALTER TABLE entries ADD COLUMN user_id TEXT"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE entries ADD COLUMN relationship TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE entries ADD COLUMN notes TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''"); } catch { /* exists */ }
 
 export const Users = {
+  setPhone: (id, phone) => db.prepare("UPDATE users SET phone = ? WHERE id = ?").run(phone, id),
   byEmail: (email) => db.prepare("SELECT * FROM users WHERE email = ?").get(email.toLowerCase()),
   byId: (id) => db.prepare("SELECT * FROM users WHERE id = ?").get(id),
   count: () => db.prepare("SELECT COUNT(*) n FROM users").get().n,
@@ -60,10 +64,10 @@ export const Sessions = {
 export const Entries = {
   forUser: (userId) => db.prepare("SELECT * FROM entries WHERE user_id = ? ORDER BY created_at DESC").all(userId),
   get: (id, userId) => db.prepare("SELECT * FROM entries WHERE id = ? AND user_id = ?").get(id, userId),
-  create: (e) => db.prepare(`INSERT INTO entries (id, user_id, name, occasion, date, yearly, todo, remind_days)
-    VALUES (@id, @user_id, @name, @occasion, @date, @yearly, @todo, @remind_days)`).run(e),
+  create: (e) => db.prepare(`INSERT INTO entries (id, user_id, name, occasion, date, yearly, todo, remind_days, relationship, notes)
+    VALUES (@id, @user_id, @name, @occasion, @date, @yearly, @todo, @remind_days, @relationship, @notes)`).run(e),
   update: (e) => db.prepare(`UPDATE entries SET name=@name, occasion=@occasion, date=@date,
-    yearly=@yearly, todo=@todo, remind_days=@remind_days WHERE id=@id AND user_id=@user_id`).run(e),
+    yearly=@yearly, todo=@todo, remind_days=@remind_days, relationship=@relationship, notes=@notes WHERE id=@id AND user_id=@user_id`).run(e),
   remove: (id, userId) => {
     db.prepare("DELETE FROM sent_reminders WHERE entry_id = ?").run(id);
     return db.prepare("DELETE FROM entries WHERE id = ? AND user_id = ?").run(id, userId);

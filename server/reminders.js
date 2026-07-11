@@ -52,6 +52,21 @@ async function sendEmail({ to, subject, html, text }) {
   return true;
 }
 
+async function sendSMS(to, body) {
+  const sid = process.env.TWILIO_ACCOUNT_SID, tok = process.env.TWILIO_AUTH_TOKEN, from = process.env.TWILIO_FROM;
+  if (!sid || !tok || !from || !to) return false;
+  const res = await fetch(`https://api.twilio.com/2010-04-01/Accounts/${sid}/Messages.json`, {
+    method: "POST",
+    headers: {
+      Authorization: "Basic " + Buffer.from(`${sid}:${tok}`).toString("base64"),
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: new URLSearchParams({ To: to, From: from, Body: body }),
+  });
+  if (!res.ok) { console.error("[reminders] SMS failed:", res.status, await res.text()); return false; }
+  return true;
+}
+
 async function sweepUser(user) {
   const today = todayISO(user.timezone);
   const due = [];
@@ -79,6 +94,7 @@ async function sweepUser(user) {
       <table style="width:100%;border-collapse:collapse;background:#1a1712;border-radius:8px;">${rows}</table></div>`;
 
   const ok = await sendEmail({ to: user.email, subject, html, text: lines.join("\n") });
+  if (user.phone) await sendSMS(user.phone, `Aide-Mémoire — ${subject}\n${lines.join("\n")}`);
   if (ok) { for (const { entry, occurrence } of due) Sent.mark(entry.id, occurrence); return due.length; }
   return 0;
 }

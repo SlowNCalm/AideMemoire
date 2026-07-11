@@ -28,21 +28,37 @@ function Gate({ onEnter }) {
     try {
       const r = mode === "login" ? await api.login(email, password) : await api.signup(email, password, invite);
       setToken(r.token);
-      speak(persona.greet()); // also unlocks browser audio for the session
+      speak(persona.greet()); // unlocks browser audio; the briefing follows on the dashboard
       onEnter();
     } catch (e) { setErr(e.message || "Something went wrong."); }
     finally { setBusy(false); }
   };
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
-      <div style={{ width: "100%", maxWidth: 400 }}>
-        <div style={{ textAlign: "center" }}>
-          <Wordmark />
-          <p style={{ color: "var(--faded)", fontSize: 14, margin: "8px 0 24px" }}>
-            Your executive assistant for the dates that matter.
-          </p>
+    <div style={{ minHeight: "100vh", padding: "48px 20px 80px" }}>
+      <div style={{ maxWidth: 880, margin: "0 auto", textAlign: "center" }}>
+        <Wordmark size={44} />
+        <h2 style={{ fontFamily: "var(--serif)", fontSize: 26, fontWeight: 400, margin: "26px auto 10px", maxWidth: 620, lineHeight: 1.3 }}>
+          The executive assistant for the <em style={{ color: "var(--gold)" }}>relationships</em> that matter.
+        </h2>
+        <p style={{ color: "var(--faded)", fontSize: 15, maxWidth: 560, margin: "0 auto 34px", lineHeight: 1.6 }}>
+          For busy owners and relationship managers. Speak a date once — a client's birthday, a partner's
+          anniversary, a board dinner — and it's kept, watched for conflicts, and delivered to your inbox
+          before it arrives, with exactly what to arrange.
+        </p>
+        <div style={{ display: "flex", gap: 14, justifyContent: "center", flexWrap: "wrap", marginBottom: 44 }}>
+          {[["🎙", "Voice-first", "Say \"Hey Jarvis\" — it listens, understands, confirms, and files it. No typing."],
+            ["🗓", "Conflict-aware", "Warns you out loud when commitments collide, like a real chief of staff."],
+            ["✉️", "Reminders that arrive", "Morning briefings, email and text reminders — even while you sleep."]].map(([icon, title, body]) => (
+            <div key={title} className="card" style={{ padding: "18px 20px", width: 250, textAlign: "left" }}>
+              <div style={{ fontSize: 22 }}>{icon}</div>
+              <div style={{ fontFamily: "var(--serif)", fontSize: 17, fontWeight: 600, margin: "8px 0 4px" }}>{title}</div>
+              <div style={{ fontSize: 13, color: "var(--faded)", lineHeight: 1.5 }}>{body}</div>
+            </div>
+          ))}
         </div>
+      </div>
+      <div style={{ width: "100%", maxWidth: 400, margin: "0 auto" }}>
         <div style={{ display: "flex", gap: 0, marginBottom: 18, border: "1px solid var(--line)", borderRadius: 8, overflow: "hidden" }}>
           {["login", "signup"].map((m) => (
             <button key={m} onClick={() => { setMode(m); setErr(""); }}
@@ -132,6 +148,8 @@ function Dashboard({ onLogout }) {
   const [view, setView] = useState("list");           // "list" | "calendar"
   const [month, setMonth] = useState(() => new Date().toISOString().slice(0, 7));
   const [thinking, setThinking] = useState(false);
+  const [draftMsg, setDraftMsg] = useState(null);        // {message} from the "draft" intent
+  const [showSettings, setShowSettings] = useState(false);
   const [toast, setToast] = useState("");
   const toastTimer = useRef();
 
@@ -148,6 +166,20 @@ function Dashboard({ onLogout }) {
   }, [onLogout]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // chief-of-staff briefing, spoken once per session
+  const briefedRef = useRef(false);
+  useEffect(() => {
+    if (briefedRef.current || !loaded) return;
+    briefedRef.current = true;
+    (async () => {
+      try {
+        const { reply } = await api.briefing();
+        if (reply) { notify(reply); speak(reply); }
+      } catch { /* silent */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loaded]);
 
   const save = async (data) => {
     try {
@@ -188,6 +220,10 @@ function Dashboard({ onLogout }) {
         if (result.view) setView(result.view);
         if (result.month) setMonth(result.month);
         if (result.view === "calendar" || result.month) setView("calendar");
+        if (result.reply) speak(result.reply);
+        break;
+      case "draft":
+        if (result.message) setDraftMsg({ message: result.message });
         if (result.reply) speak(result.reply);
         break;
       case "delete":
@@ -282,6 +318,7 @@ function Dashboard({ onLogout }) {
       )}
 
       <footer style={{ marginTop: 40, textAlign: "right" }}>
+        <button className="linklike" style={{ marginRight: 16 }} onClick={() => setShowSettings(true)}>Settings</button>
         <button className="linklike" onClick={() => { api.logout(); onLogout(); }}>Sign out</button>
       </footer>
 
@@ -297,6 +334,8 @@ function Dashboard({ onLogout }) {
       {manualDraft !== null && (
         <EntryForm initial={manualDraft} onCancel={() => setManualDraft(null)} onSubmit={save} />
       )}
+      {draftMsg && <DraftModal message={draftMsg.message} onClose={() => setDraftMsg(null)} />}
+      {showSettings && <SettingsModal onClose={() => setShowSettings(false)} notify={notify} />}
     </div>
   );
 }
@@ -573,6 +612,55 @@ function VoiceReview({ utterance, seed, onSave, onCancel, onEditByHand }) {
   );
 }
 
+// ============================================================ Draft message modal
+function DraftModal({ message, onClose }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try { await navigator.clipboard.writeText(message); setCopied(true); setTimeout(() => setCopied(false), 2000); }
+    catch { /* clipboard blocked */ }
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(10,9,7,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}
+      onClick={(ev) => ev.target === ev.currentTarget && onClose()}>
+      <div className="card fadein" style={{ padding: 26, width: "100%", maxWidth: 520, background: "var(--bg)" }}>
+        <h2 style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 500, margin: "0 0 14px" }}>Drafted for you</h2>
+        <textarea readOnly value={message} rows={Math.min(14, message.split("\n").length + 3)} style={{ fontSize: 14, lineHeight: 1.6 }} />
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 16 }}>
+          <button className="btn quiet" onClick={onClose}>Close</button>
+          <button className="btn" onClick={copy}>{copied ? "Copied ✓" : "Copy"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================ Settings (phone for SMS)
+function SettingsModal({ onClose, notify }) {
+  const [phone, setPhoneVal] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { api.me().then((m) => { setPhoneVal(m.phone || ""); setLoaded(true); }).catch(() => setLoaded(true)); }, []);
+  const saveIt = async () => {
+    try { await api.setPhone(phone); notify(phone ? "Phone saved — text reminders enabled if SMS is configured." : "Phone removed."); onClose(); }
+    catch (e) { notify(e.message); }
+  };
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(10,9,7,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}
+      onClick={(ev) => ev.target === ev.currentTarget && onClose()}>
+      <div className="card fadein" style={{ padding: 26, width: "100%", maxWidth: 420, background: "var(--bg)" }}>
+        <h2 style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 500, margin: "0 0 6px" }}>Settings</h2>
+        <p style={{ fontSize: 13, color: "var(--faded)", margin: "0 0 14px" }}>
+          Add a mobile number (with country code, e.g. +15551234567) to also receive reminders by text.
+        </p>
+        <input placeholder="+1…" value={phone} disabled={!loaded} onChange={(e) => setPhoneVal(e.target.value)} />
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
+          <button className="btn quiet" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={saveIt}>Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ============================================================ Entry card
 function EntryCard({ e, highlight, onEdit, onDelete }) {
   const [confirm, setConfirm] = useState(false);
@@ -583,7 +671,7 @@ function EntryCard({ e, highlight, onEdit, onDelete }) {
         <div style={{ minWidth: 0 }}>
           <div style={{ display: "flex", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
             <span style={{ fontFamily: "var(--serif)", fontSize: 21, fontWeight: 600 }}>{occ.emoji} {e.name}</span>
-            <span style={{ color: "var(--faded)", fontSize: 13 }}>{occ.label}</span>
+            <span style={{ color: "var(--faded)", fontSize: 13 }}>{occ.label}{e.relationship ? ` · ${e.relationship}` : ""}</span>
           </div>
           <div style={{ fontSize: 13, color: "var(--faded)", marginTop: 4 }}>
             {fmtDate(e.next_occurrence)}{e.yearly ? " · repeats yearly" : ""} · reminder {e.remind_days === 0 ? "on the day" : `${e.remind_days}d before`}
@@ -621,6 +709,8 @@ function EntryForm({ initial, onCancel, onSubmit }) {
   const [yearly, setYearly] = useState(initial.yearly ?? true);
   const [todo, setTodo] = useState(initial.todo || "");
   const [remind, setRemind] = useState(initial.remind_days ?? 7);
+  const [relationship, setRelationship] = useState(initial.relationship || "");
+  const [notes, setNotes] = useState(initial.notes || "");
   const valid = name.trim() && date;
 
   const label = { display: "block", fontSize: 11, fontWeight: 600, color: "var(--faded)", textTransform: "uppercase", letterSpacing: "0.08em", margin: "18px 0 7px" };
@@ -665,6 +755,13 @@ function EntryForm({ initial, onCancel, onSubmit }) {
         <textarea rows={3} value={todo} onChange={(e) => setTodo(e.target.value)}
           placeholder="Order white orchids, reserve the private room, have a card couriered…" />
 
+        <label style={label}>Relationship</label>
+        <input value={relationship} onChange={(e) => setRelationship(e.target.value)} placeholder="Mother, key client, college friend…" />
+
+        <label style={label}>Notes & preferences</label>
+        <textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)}
+          placeholder="Prefers Scotch, no peated. Sent orchids last year. Window tables only…" />
+
         <label style={label}>Email me</label>
         <select value={remind} onChange={(e) => setRemind(Number(e.target.value))}>
           <option value={0}>On the day</option>
@@ -681,6 +778,7 @@ function EntryForm({ initial, onCancel, onSubmit }) {
             onClick={() => onSubmit({
               id: initial.id, name: name.trim(), occasion, date, yearly,
               todo: todo.trim(), remind_days: remind,
+              relationship: relationship.trim(), notes: notes.trim(),
             })}>
             {initial.id ? "Save changes" : "Keep this date"}
           </button>

@@ -38,6 +38,9 @@ export const api = {
   remove: (id) => req(`/api/entries/${id}`, { method: "DELETE" }),
   testReminder: () => req("/api/reminders/test", { method: "POST" }),
   assistant: (text, draft) => req("/api/assistant", { method: "POST", body: JSON.stringify({ text, draft }) }),
+  briefing: () => req("/api/briefing"),
+  me: () => req("/api/me"),
+  setPhone: (phone) => req("/api/me", { method: "PATCH", body: JSON.stringify({ phone }) }),
 };
 
 // ---------------- occasions ----------------
