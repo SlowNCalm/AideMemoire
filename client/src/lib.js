@@ -140,12 +140,31 @@ export function humanDays(d) {
 }
 
 // ---------------- voice conversation helpers ----------------
+let cachedVoice = null;
+function pickVoice() {
+  if (cachedVoice) return cachedVoice;
+  try {
+    const voices = window.speechSynthesis.getVoices() || [];
+    // prefer a refined British male voice; degrade gracefully
+    cachedVoice =
+      voices.find((v) => /en-GB/i.test(v.lang) && /daniel|george|arthur|male/i.test(v.name)) ||
+      voices.find((v) => /en-GB/i.test(v.lang)) ||
+      voices.find((v) => /^en/i.test(v.lang)) ||
+      null;
+  } catch { cachedVoice = null; }
+  return cachedVoice;
+}
+try { window.speechSynthesis.onvoiceschanged = () => { cachedVoice = null; pickVoice(); }; } catch { /* noop */ }
+
 export function speak(text) {
   return new Promise((resolve) => {
     try {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.02;
+      const v = pickVoice();
+      if (v) u.voice = v;
+      u.rate = 0.98;
+      u.pitch = 0.92;
       let done = false;
       const finish = () => { if (!done) { done = true; setTimeout(resolve, 350); } }; // gap so the mic never hears the tail of the voice
       u.onend = finish;
@@ -247,4 +266,26 @@ export function parseCorrection(text, draft) {
   // bare short answer while a field is missing (handled by caller passing expectField)
   if (changed.length === 0) return { action: "unclear" };
   return { action: "update", draft: next, changed };
+}
+
+
+// ---------------- butler persona ----------------
+const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
+export const persona = {
+  acknowledge: () => pick(["Sir?", "At your service.", "Listening, sir."]),
+  askName: () => pick(["Certainly. For whom, sir?", "Of course — who is this for?", "Very good. Whom shall I note this for, sir?"]),
+  askDate: (name) => pick([`And the date for ${name}, sir?`, `When shall I mark it for ${name}?`, `${name} — on what date, sir?`]),
+  confirmPrefix: () => pick(["As I have it:", "Noted, sir:", "Very good:"]),
+  savingSuffix: () => pick(["I'll file it momentarily — do interrupt if I've erred.", "Committing it to the ledger — say stop to amend.", "Filing now, sir — speak up if anything's amiss."]),
+  saved: (leadPhrase) => pick([`Done, sir. I shall remind you ${leadPhrase}.`, `Filed. Expect my note ${leadPhrase}.`, `Very good, sir — it's in the ledger. I'll write ${leadPhrase}.`]),
+  cancelled: () => pick(["As you wish — discarded.", "Very well, sir. We shall speak of it no more.", "Struck from the record."]),
+  unclear: () => pick(["Forgive me, sir — say yes to keep it, or tell me what to amend.", "I didn't quite catch that. Yes to file it, or name the correction."]),
+  stillThere: () => pick(["Whenever you're ready, sir. The buttons below also serve.", "I remain at your disposal — voice or buttons, as you prefer."]),
+};
+export function leadPhrase(days) {
+  if (days === 0) return "on the day itself";
+  if (days === 1) return "the day before";
+  if (days % 30 === 0 && days >= 30) return days === 30 ? "a month ahead" : `${days / 30} months ahead`;
+  if (days % 7 === 0 && days >= 7) return days === 7 ? "a week ahead" : `${days / 7} weeks ahead`;
+  return `${days} days ahead`;
 }

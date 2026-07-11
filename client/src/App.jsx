@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   api, setToken, hasToken, clearToken,
   OCCASIONS, parseUtterance, fmtDate, humanDays,
-  speak, stopSpeaking, draftSummary, parseCorrection,
+  speak, stopSpeaking, draftSummary, parseCorrection, persona, leadPhrase,
 } from "./lib.js";
 
 // ============================================================ App shell
@@ -273,7 +273,7 @@ function VoicePanel({ onUtterance, paused }) {
       let command = text.slice(m.index + m[0].length).trim();
       if (!command) {
         // "Hey Jarvis." on its own → acknowledge and take the next sentence as the command
-        await speak("Yes?");
+        await speak(persona.acknowledge());
         if (pausedRef.current) break;
         setListening(true);
         const follow = await listenUntilSilence({ silenceMs: 2200, maxMs: 60000, noSpeechMs: 10000, onPartial: setTranscript });
@@ -322,7 +322,7 @@ function VoicePanel({ onUtterance, paused }) {
       <div style={{ flex: 1, minWidth: 220 }}>
         <div style={{ fontFamily: "var(--serif)", fontSize: 19, fontStyle: transcript ? "normal" : "italic", color: transcript ? "var(--ink)" : "var(--faded)" }}>
           {transcript || (listening
-            ? (handsFree ? 'Standing by — say "Hey Jarvis" followed by your request.' : "Listening — take your time, I'll wait for a pause.")
+            ? (handsFree ? 'Standing by, sir — say "Hey Jarvis" followed by your request.' : "Listening — take your time, I'll wait for a pause.")
             : "Tap the orb and speak — name, occasion, date, and what to arrange.")}
         </div>
         {micError
@@ -378,7 +378,7 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
 
       let firstPass = true;
       while (aliveRef.current) {
-        if (result.intent === "cancel") { await speak("Discarded."); onCancel(); return; }
+        if (result.intent === "cancel") { await speak(persona.cancelled()); onCancel(); return; }
         if (result.intent === "edit_by_hand") { onEditByHand(draftRef.current || {}); return; }
         if (result.intent === "save" && draftRef.current?.name && draftRef.current?.date) break;
 
@@ -390,10 +390,11 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
         // 2. speak — either a single missing-field question, or the summary with auto-save notice
         setPhase("speaking");
         let prompt;
-        if (missing === "name") prompt = "Got it — who is this for?";
-        else if (missing === "date") prompt = `${d.name} — what's the date?`;
-        else if (result.unclear) prompt = "Say yes to keep it, or tell me what to change.";
-        else prompt = `${draftSummary(d)}. Saving — say stop to change anything.`;
+        if (missing === "name") prompt = persona.askName();
+        else if (missing === "date") prompt = persona.askDate(d.name);
+        else if (result.unclear) prompt = persona.unclear();
+        else if (result.reply && firstPass) prompt = `${result.reply} ${persona.savingSuffix()}`;
+        else prompt = `${persona.confirmPrefix()} ${draftSummary(d)}. ${persona.savingSuffix()}`;
         setCaption(prompt);
         await speak(prompt);
         if (!aliveRef.current) return;
@@ -411,7 +412,7 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
 
         if (!text) {
           if (!missing && !result.unclear) break; // silence after summary → save
-          setCaption("Still there? You can also use the buttons below.");
+          setCaption(persona.stillThere());
           result = { intent: "entry", entry: draftRef.current, missing: [], unclear: true };
           continue;
         }
@@ -427,7 +428,7 @@ function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
       if (!aliveRef.current) return;
       const final = draftRef.current;
       setPhase("saving");
-      speak("Kept.");
+      speak(persona.saved(leadPhrase(final.remind_days)));
       onSave(final);
     })();
     return () => { aliveRef.current = false; stopSpeaking(); };
