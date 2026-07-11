@@ -1,7 +1,9 @@
 // The assistant brain: turns speech into structured intents with a spoken reply,
 // aware of the user's existing ledger. Returns null if no API key / failure.
 
-const SYSTEM = `You are Aide-Mémoire, a voice executive assistant with the manner of an impeccably composed, dryly witty English butler. You help busy people track important dates for the people and relationships in their lives and remind them what to arrange. Address the speaker as "sir" unless they've asked otherwise. Original phrasing only — never quote or imitate any film or franchise character.
+const SYSTEM = `You are Aide-Mémoire, a voice executive assistant with the manner of an impeccably composed, dryly witty English butler. Your core duty is tracking important dates and relationships — but like any first-rate executive assistant, you are broadly knowledgeable and answer ANY question put to you: arithmetic and calculations (be precise), general knowledge, business and finance concepts, current events (search the web when the answer could have changed or you're unsure), advice, translations, anything. Address the speaker as "sir" unless they've asked otherwise. Original phrasing only — never quote or imitate any film or franchise character.
+
+Replies are SPOKEN aloud: keep them under ~70 words, conversational, no markdown, no lists — flowing speech. For calculations, state the answer first, method only if asked.
 
 You receive: today's date, the user's current LEDGER (their saved entries), optionally a DRAFT being discussed, recent conversation HISTORY, and their latest speech.
 
@@ -25,7 +27,7 @@ Intent guide:
 - "cancel": discarding the draft or aborting.
 - "edit_by_hand": wants to type ("let me type", "open the form").
 - "show": navigation — "show me the calendar", "show March", "calendar view", "back to the list". Resolve month names to yyyy-mm using today.
-- "answer": a question about the ledger ("what's coming up this month?", "when is my mother's birthday?", "who needs attention?"). Answer precisely from LEDGER data in "reply".
+- "answer": ANY question — about the ledger ("what's coming up this month?"), or about anything else in the world ("what's 15% of 2.4 million?", "what time is it in Singapore?", "explain a reverse merger", "who won the match last night?"). Ledger questions: answer precisely from LEDGER data. World questions: answer from knowledge, searching the web first when the answer is time-sensitive or uncertain. Put the full spoken answer in "reply".
 - "delete": removing an existing ledger entry ("remove James's dinner"). Match to a LEDGER id; if ambiguous, use intent "answer" and ask which one.
 - "draft": composing a message for someone ("draft a birthday note for James", "write a text congratulating Sarah"). Put the complete, ready-to-send message in "message" — warm, polished, appropriate to the relationship and occasion, using LEDGER details (relationship, notes, preferences) where they exist. In "reply", announce it briefly ("A draft for James, sir — on your screen.").
 - "none": chit-chat or anything else; respond briefly in persona.
@@ -34,9 +36,80 @@ Person profiles: "relationship" (e.g. "mother", "key client", "college friend") 
 
 Executive-assistant duties for "entry": resolve relative dates from today. remind_days: "two weeks before"=14, "a month"=30, "day before"=1, "on the day"=0, default 7. yearly: birthdays/anniversaries/memorials/holidays true; one-off events/check-ins false unless stated. Never invent a name or date not stated. Interpret speech-to-text garbling charitably. In "reply", confirm what you understood or ask for the single missing detail.`;
 
+// ---------------- provider abstraction ----------------
+// LLM_PROVIDER=anthropic (default) | openai-compatible (Qwen, DeepSeek, OpenAI, Groq…)
+// For Qwen: LLM_PROVIDER=qwen, QWEN_API_KEY=sk-…, optional QWEN_MODEL (default qwen-plus),
+// optional QWEN_BASE_URL (default DashScope international compatible-mode endpoint).
+function providerConfig() {
+  const p = (process.env.LLM_PROVIDER || "anthropic").toLowerCase();
+  if (p === "anthropic") return { kind: "anthropic", key: process.env.ANTHROPIC_API_KEY };
+  // generic OpenAI-compatible path; qwen gets sensible defaults
+  const isQwen = p === "qwen";
+  return {
+    kind: "openai",
+    key: process.env.OPENAI_COMPAT_API_KEY || (isQwen ? process.env.QWEN_API_KEY : process.env.OPENAI_API_KEY),
+    base: process.env.OPENAI_COMPAT_BASE_URL || process.env.QWEN_BASE_URL ||
+      (isQwen ? "https://dashscope-intl.aliyuncs.com/compatible-mode/v1" : "https://api.openai.com/v1"),
+    model: process.env.OPENAI_COMPAT_MODEL || process.env.QWEN_MODEL || (isQwen ? "qwen-plus" : "gpt-4o-mini"),
+  };
+}
+
+// One call, either provider. tools only supported on Anthropic (web search).
+async function chatLLM({ system, user, maxTokens, tools }) {
+  const cfg = providerConfig();
+  if (!cfg.key) return null;
+
+  if (cfg.kind === "anthropic") {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "x-api-key": cfg.key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+      body: JSON.stringify({
+        model: process.env.PARSE_MODEL || "claude-haiku-4-5-20251001",
+        max_tokens: maxTokens,
+        system,
+        messages: [{ role: "user", content: user }],
+        ...(tools && process.env.WEB_SEARCH !== "off" ? { tools } : {}),
+      }),
+    });
+    if (!res.ok) { console.error("[llm] anthropic error:", res.status, await res.text()); return null; }
+    const data = await res.json();
+    return (data.content || []).map((b) => (b.type === "text" ? b.text : "")).filter(Boolean).join("\n");
+  }
+
+  // OpenAI-compatible (Qwen / DeepSeek / OpenAI / Groq …)
+  const res = await fetch(`${cfg.base.replace(/\/$/, "")}/chat/completions`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${cfg.key}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      model: cfg.model,
+      max_tokens: maxTokens,
+      messages: [{ role: "system", content: system }, { role: "user", content: user }],
+    }),
+  });
+  if (!res.ok) { console.error("[llm] openai-compat error:", res.status, await res.text()); return null; }
+  const data = await res.json();
+  return data.choices?.[0]?.message?.content || null;
+}
+
+// The model may emit prose around the JSON (especially after web searches);
+// pull out the last JSON object that contains an "intent" key.
+function extractJson(text) {
+  const clean = text.replace(/```json|```/g, "");
+  try { return JSON.parse(clean.trim()); } catch { /* keep hunting */ }
+  const idx = clean.lastIndexOf('{"intent"');
+  const start = idx >= 0 ? idx : clean.indexOf("{");
+  if (start < 0) return null;
+  // walk to the balanced closing brace
+  let depth = 0;
+  for (let i = start; i < clean.length; i++) {
+    if (clean[i] === "{") depth++;
+    else if (clean[i] === "}") { depth--; if (depth === 0) { try { return JSON.parse(clean.slice(start, i + 1)); } catch { return null; } } }
+  }
+  return null;
+}
+
 export async function assistant({ text, draft, entries, today, history }) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return null;
+  if (!providerConfig().key) return null;
   try {
     const ledger = (entries || []).map((e) => ({
       id: e.id, name: e.name, occasion: e.occasion, next: e.next_occurrence,
@@ -50,20 +123,14 @@ export async function assistant({ text, draft, entries, today, history }) {
       (hist ? `HISTORY:\n${hist}\n` : "") +
       (draft ? `DRAFT under discussion: ${JSON.stringify(draft)}\n` : "") +
       `Speech: "${text}"`;
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({
-        model: process.env.PARSE_MODEL || "claude-haiku-4-5-20251001",
-        max_tokens: 600,
-        system: SYSTEM,
-        messages: [{ role: "user", content: user }],
-      }),
+    const out = await chatLLM({
+      system: SYSTEM,
+      user,
+      maxTokens: 900,
+      tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }],
     });
-    if (!res.ok) { console.error("[assistant] API error:", res.status, await res.text()); return null; }
-    const data = await res.json();
-    const out = (data.content || []).map((b) => b.text || "").join("");
-    const parsed = JSON.parse(out.replace(/```json|```/g, "").trim());
+    if (!out) return null;
+    const parsed = extractJson(out);
     if (!parsed || !parsed.intent) return null;
     return parsed;
   } catch (e) {
@@ -89,26 +156,19 @@ function templateBriefing(entries, hour) {
 }
 
 export async function briefing({ entries, today, hour }) {
-  const key = process.env.ANTHROPIC_API_KEY;
-  if (!key) return templateBriefing(entries, hour);
+  if (!providerConfig().key) return templateBriefing(entries, hour);
   try {
     const ledger = (entries || []).map((e) => ({
       name: e.name, occasion: e.occasion, next: e.next_occurrence, days_until: e.days_until,
       remind_days: e.remind_days, todo: e.todo || undefined, relationship: e.relationship || undefined,
     }));
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" },
-      body: JSON.stringify({
-        model: process.env.PARSE_MODEL || "claude-haiku-4-5-20251001",
-        max_tokens: 300,
-        system: BRIEFING_SYSTEM,
-        messages: [{ role: "user", content: `Today is ${today}, hour ${hour}. LEDGER: ${JSON.stringify(ledger)}` }],
-      }),
+    const out = await chatLLM({
+      system: BRIEFING_SYSTEM,
+      user: `Today is ${today}, hour ${hour}. LEDGER: ${JSON.stringify(ledger)}`,
+      maxTokens: 300,
     });
-    if (!res.ok) throw new Error("api " + res.status);
-    const data = await res.json();
-    return (data.content || []).map((b) => b.text || "").join("").trim();
+    if (!out) return templateBriefing(entries, hour);
+    return out.trim();
   } catch (e) {
     console.error("[briefing] failed:", e.message);
     return templateBriefing(entries, hour);

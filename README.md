@@ -61,6 +61,9 @@ For live-reload frontend work: `npm start` in one terminal, `cd client && npm ru
 | `ACCESS_CODE` | yes | Login code for the site. If unset, the site is open to anyone — don't do that in production. |
 | `RESEND_API_KEY` | yes | Resend API key for sending email. |
 | `ANTHROPIC_API_KEY` | strongly recommended | Enables AI understanding of spoken requests (from console.anthropic.com). Without it, voice falls back to basic pattern matching. |
+| `LLM_PROVIDER` | no | `anthropic` (default) or `qwen` (or any OpenAI-compatible provider via `OPENAI_COMPAT_*` vars). |
+| `QWEN_API_KEY` / `QWEN_MODEL` / `QWEN_BASE_URL` | no | For `LLM_PROVIDER=qwen`: key from Alibaba Model Studio (DashScope); model defaults to `qwen-plus`; base URL defaults to the international endpoint. Note: web search is Anthropic-only. |
+| `WEB_SEARCH` | no | Set to `off` to disable the assistant's web search (on by default when the Anthropic key is set; searches cost ~$0.01 each and only fire for time-sensitive questions). |
 | `PARSE_MODEL` | no | Anthropic model for parsing. Default `claude-haiku-4-5-20251001`. |
 | `REMINDER_EMAIL_TO` | yes | Where reminder emails go. |
 | `REMINDER_EMAIL_FROM` | no | Sender. Default `Aide-Mémoire <onboarding@resend.dev>` (works only to your own Resend account email until you verify a domain). |
