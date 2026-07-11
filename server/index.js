@@ -5,6 +5,7 @@ import { fileURLToPath } from "url";
 import cron from "node-cron";
 import { Entries } from "./db.js";
 import { runReminderSweep, nextOccurrence, daysUntil } from "./reminders.js";
+import { llmParse } from "./llm.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -75,6 +76,19 @@ app.put("/api/entries/:id", requireAuth, (req, res) => {
 app.delete("/api/entries/:id", requireAuth, (req, res) => {
   Entries.remove(req.params.id);
   res.json({ ok: true });
+});
+
+// ---------- voice parsing (LLM) ----------
+app.post("/api/parse", requireAuth, async (req, res) => {
+  const text = String(req.body?.text || "").slice(0, 1000);
+  if (!text.trim()) return res.status(400).json({ error: "No speech provided." });
+  const result = await llmParse({
+    text,
+    draft: req.body?.draft || null,
+    today: new Date().toLocaleDateString("en-CA", { timeZone: process.env.TIMEZONE || "America/Toronto" }),
+  });
+  if (!result) return res.json({ fallback: true }); // client uses local heuristics
+  res.json(result);
 });
 
 // ---------- reminder trigger ----------

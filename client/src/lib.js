@@ -35,6 +35,7 @@ export const api = {
   update: (e) => req(`/api/entries/${e.id}`, { method: "PUT", body: JSON.stringify(e) }),
   remove: (id) => req(`/api/entries/${id}`, { method: "DELETE" }),
   testReminder: () => req("/api/reminders/test", { method: "POST" }),
+  parse: (text, draft) => req("/api/parse", { method: "POST", body: JSON.stringify({ text, draft }) }),
 };
 
 // ---------------- occasions ----------------
@@ -145,11 +146,13 @@ export function speak(text) {
       window.speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 1.02;
-      u.onend = resolve;
-      u.onerror = resolve;
+      let done = false;
+      const finish = () => { if (!done) { done = true; setTimeout(resolve, 350); } }; // gap so the mic never hears the tail of the voice
+      u.onend = finish;
+      u.onerror = finish;
       window.speechSynthesis.speak(u);
-      // safety: resolve even if onend never fires
-      setTimeout(resolve, Math.min(12000, 350 + text.length * 65));
+      // generous safety net only for browsers where onend never fires
+      setTimeout(finish, 3000 + text.length * 110);
     } catch { resolve(); }
   });
 }

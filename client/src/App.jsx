@@ -34,9 +34,7 @@ function Gate({ onEnter }) {
     <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
       <div style={{ width: "100%", maxWidth: 380, textAlign: "center" }}>
         <Wordmark />
-        <p style={{ color: "var(--faded)", fontSize: 14, margin: "8px 0 28px" }}>
-          Private access
-        </p>
+        <p style={{ color: "var(--faded)", fontSize: 14, margin: "8px 0 28px" }}>Private access</p>
         <input
           type="password" placeholder="Access code" value={code}
           onChange={(e) => setCode(e.target.value)}
@@ -60,26 +58,70 @@ function Wordmark({ size = 34 }) {
   );
 }
 
+// ============================================================ shared listening helper
+// Listens until ~2s of silence after speech (or maxMs). Never cuts you off mid-sentence.
+export function listenUntilSilence({ silenceMs = 2000, maxMs = 45000, noSpeechMs = 8000, onPartial } = {}) {
+  return new Promise((resolve) => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return resolve({ text: "", supported: false });
+    const rec = new SR();
+    rec.lang = "en-US";
+    rec.interimResults = true;
+    rec.continuous = true;
+
+    let finalBuf = "", interimBuf = "", settled = false, heardAnything = false;
+    let silenceTimer = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(silenceTimer);
+      clearTimeout(noSpeechTimer);
+      clearTimeout(maxTimer);
+      try { rec.stop(); } catch { /* noop */ }
+      resolve({ text: (finalBuf || interimBuf).trim(), supported: true, stop });
+    };
+    const stop = () => finish();
+
+    const armSilence = () => {
+      clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(finish, silenceMs);
+    };
+
+    const noSpeechTimer = setTimeout(() => { if (!heardAnything) finish(); }, noSpeechMs);
+    const maxTimer = setTimeout(finish, maxMs);
+
+    rec.onresult = (ev) => {
+      heardAnything = true;
+      finalBuf = ""; interimBuf = "";
+      for (const r of ev.results) (r.isFinal ? (finalBuf += r[0].transcript + " ") : (interimBuf += r[0].transcript));
+      onPartial?.((finalBuf + interimBuf).trim());
+      armSilence();
+    };
+    rec.onerror = finish;
+    rec.onend = () => { if (!settled && (finalBuf || interimBuf)) finish(); else if (!settled) finish(); };
+    try { rec.start(); } catch { finish(); }
+  });
+}
+
 // ============================================================ Dashboard
 function Dashboard({ onLogout }) {
   const [entries, setEntries] = useState([]);
   const [loaded, setLoaded] = useState(false);
-  const [draft, setDraft] = useState(null);       // entry being created/edited in the form
+  const [voiceText, setVoiceText] = useState(null); // utterance handed to VoiceReview
+  const [manualDraft, setManualDraft] = useState(null);
   const [toast, setToast] = useState("");
   const toastTimer = useRef();
 
   const notify = (msg) => {
     setToast(msg);
     clearTimeout(toastTimer.current);
-    toastTimer.current = setTimeout(() => setToast(""), 3500);
+    toastTimer.current = setTimeout(() => setToast(""), 4000);
   };
 
   const refresh = useCallback(async () => {
-    try {
-      setEntries(await api.list());
-    } catch (e) {
-      if (e.message === "unauthorized") onLogout();
-    }
+    try { setEntries(await api.list()); }
+    catch (e) { if (e.message === "unauthorized") onLogout(); }
     setLoaded(true);
   }, [onLogout]);
 
@@ -88,28 +130,26 @@ function Dashboard({ onLogout }) {
   const save = async (data) => {
     try {
       if (data.id) { await api.update(data); notify("Saved."); }
-      else { await api.create(data); notify(`${data.name} added. You'll be emailed ${data.remind_days === 0 ? "on the day" : `${data.remind_days} day${data.remind_days === 1 ? "" : "s"} before`}.`); }
-      setDraft(null);
+      else { await api.create(data); notify(`${data.name} — kept. Email ${data.remind_days === 0 ? "on the day" : `${data.remind_days}d before`}.`); }
+      setManualDraft(null); setVoiceText(null);
       refresh();
     } catch (e) { notify(e.message); }
   };
 
-  const remove = async (id) => {
-    await api.remove(id).catch(() => {});
-    refresh();
-  };
+  const remove = async (id) => { await api.remove(id).catch(() => {}); refresh(); };
 
   const testEmail = async () => {
     notify("Running a reminder sweep…");
     try {
       const r = await api.testReminder();
-      notify(r.sent > 0 ? `Sent ${r.sent} reminder email(s). Check your inbox.` : "Nothing is inside its reminder window right now — no email sent.");
-    } catch { notify("Sweep failed — check the server logs and your Resend key."); }
+      notify(r.sent > 0 ? `Sent ${r.sent} reminder email(s). Check your inbox.` : "Nothing inside its reminder window right now — no email sent.");
+    } catch { notify("Sweep failed — check server logs and the Resend key."); }
   };
 
   const sorted = [...entries].sort((a, b) => a.days_until - b.days_until);
   const attention = sorted.filter((e) => e.days_until <= e.remind_days);
   const later = sorted.filter((e) => !attention.includes(e));
+  const busy = voiceText !== null || manualDraft !== null;
 
   return (
     <div style={{ maxWidth: 780, margin: "0 auto", padding: "44px 20px 100px" }}>
@@ -122,11 +162,11 @@ function Dashboard({ onLogout }) {
         </div>
         <div style={{ display: "flex", gap: 10 }}>
           <button className="btn quiet" onClick={testEmail}>Send test email</button>
-          <button className="btn ghost" onClick={() => setDraft({})}>+ Add by hand</button>
+          <button className="btn ghost" onClick={() => setManualDraft({})}>+ Add by hand</button>
         </div>
       </header>
 
-      <VoicePanel onDraft={(d) => setDraft(d)} paused={draft !== null} />
+      <VoicePanel paused={busy} onUtterance={(t) => setVoiceText(t)} />
 
       {toast && (
         <div className="card fadein" style={{ padding: "12px 16px", margin: "0 0 20px", borderColor: "var(--gold)", color: "var(--gold)", fontSize: 14 }}>
@@ -137,7 +177,7 @@ function Dashboard({ onLogout }) {
       {attention.length > 0 && (
         <Section title="Requires your attention" accent>
           {attention.map((e) => (
-            <EntryCard key={e.id} e={e} highlight onEdit={() => setDraft(e)} onDelete={() => remove(e.id)} />
+            <EntryCard key={e.id} e={e} highlight onEdit={() => setManualDraft(e)} onDelete={() => remove(e.id)} />
           ))}
         </Section>
       )}
@@ -150,7 +190,7 @@ function Dashboard({ onLogout }) {
           </div>
         )}
         {later.map((e) => (
-          <EntryCard key={e.id} e={e} onEdit={() => setDraft(e)} onDelete={() => remove(e.id)} />
+          <EntryCard key={e.id} e={e} onEdit={() => setManualDraft(e)} onDelete={() => remove(e.id)} />
         ))}
       </Section>
 
@@ -158,16 +198,16 @@ function Dashboard({ onLogout }) {
         <button className="linklike" onClick={onLogout}>Sign out</button>
       </footer>
 
-      {draft !== null && draft._fromVoice && !draft._manual && (
+      {voiceText !== null && (
         <VoiceReview
-          initial={draft}
+          utterance={voiceText}
           onSave={save}
-          onCancel={() => setDraft(null)}
-          onEditByHand={(d) => setDraft({ ...d, _manual: true })}
+          onCancel={() => setVoiceText(null)}
+          onEditByHand={(d) => { setVoiceText(null); setManualDraft(d); }}
         />
       )}
-      {draft !== null && (!draft._fromVoice || draft._manual) && (
-        <EntryForm initial={draft} onCancel={() => setDraft(null)} onSubmit={save} />
+      {manualDraft !== null && (
+        <EntryForm initial={manualDraft} onCancel={() => setManualDraft(null)} onSubmit={save} />
       )}
     </div>
   );
@@ -187,82 +227,49 @@ function Section({ title, accent, children }) {
   );
 }
 
-// ============================================================ Voice panel
-function VoicePanel({ onDraft, paused }) {
-  const [supported, setSupported] = useState(true);
+// ============================================================ Voice panel (capture)
+function VoicePanel({ onUtterance, paused }) {
+  const [supported] = useState(() => !!(window.SpeechRecognition || window.webkitSpeechRecognition));
   const [listening, setListening] = useState(false);
   const [handsFree, setHandsFree] = useState(false);
   const [transcript, setTranscript] = useState("");
   const [micError, setMicError] = useState("");
-  const recRef = useRef(null);
+  const sessionRef = useRef(null);
   const handsFreeRef = useRef(false);
-  handsFreeRef.current = handsFree;
   const pausedRef = useRef(false);
+  handsFreeRef.current = handsFree;
   pausedRef.current = paused;
 
-  useEffect(() => {
-    const rec = recRef.current;
-    if (!rec) return;
-    if (paused) { try { rec.abort(); } catch { /* noop */ } setListening(false); }
-    else if (handsFreeRef.current) { try { rec.start(); setListening(true); } catch { /* noop */ } }
-  }, [paused]);
+  const startSession = useCallback(async () => {
+    if (sessionRef.current || pausedRef.current) return;
+    setMicError("");
+    setListening(true);
+    sessionRef.current = true;
+    const { text, supported: ok } = await listenUntilSilence({
+      silenceMs: 2200, maxMs: 60000, noSpeechMs: 12000,
+      onPartial: setTranscript,
+    });
+    sessionRef.current = null;
+    setListening(false);
+    setTranscript("");
+    if (!ok) { setMicError("Microphone unavailable. Allow mic access for this site, then try again."); return; }
+    if (text) onUtterance(text);
+    else if (handsFreeRef.current && !pausedRef.current) startSession(); // keep waiting in hands-free
+  }, [onUtterance]);
 
+  // resume hands-free listening when a review closes
   useEffect(() => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { setSupported(false); return; }
-    const rec = new SR();
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    rec.continuous = false;
-
-    rec.onresult = (ev) => {
-      let interim = "", final = "";
-      for (const r of ev.results) (r.isFinal ? (final += r[0].transcript) : (interim += r[0].transcript));
-      setTranscript(final || interim);
-      if (final.trim()) {
-        const parsed = parseUtterance(final);
-        onDraft({
-          name: parsed.name, occasion: parsed.occasion, date: parsed.date,
-          yearly: parsed.yearly, todo: parsed.todo, remind_days: parsed.remind_days,
-          _fromVoice: true, _transcript: final.trim(),
-        });
-        setTranscript("");
-      }
-    };
-    rec.onerror = (ev) => {
-      setListening(false);
-      if (ev.error === "not-allowed" || ev.error === "service-not-allowed")
-        setMicError("Microphone access was blocked. Allow the mic for this site in your browser's address bar, then try again.");
-      else if (ev.error !== "aborted" && ev.error !== "no-speech")
-        setMicError("Couldn't hear that. Try again.");
-    };
-    rec.onend = () => {
-      setListening(false);
-      // hands-free: resume listening automatically
-      if (handsFreeRef.current && !pausedRef.current) {
-        try { rec.start(); setListening(true); } catch { /* already started */ }
-      }
-    };
-    recRef.current = rec;
-    return () => { handsFreeRef.current = false; try { rec.abort(); } catch { /* noop */ } };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (!paused && handsFreeRef.current) startSession();
+  }, [paused, startSession]);
 
   const toggle = () => {
-    setMicError("");
-    const rec = recRef.current;
-    if (!rec) return;
-    if (listening) { setHandsFree(false); rec.stop(); setListening(false); }
-    else { try { rec.start(); setListening(true); } catch { /* noop */ } }
+    if (listening) { setHandsFree(false); /* session ends itself on silence */ }
+    else startSession();
   };
-
   const toggleHandsFree = () => {
-    setMicError("");
     const next = !handsFree;
     setHandsFree(next);
-    const rec = recRef.current;
-    if (next && rec && !listening) { try { rec.start(); setListening(true); } catch { /* noop */ } }
-    if (!next && rec) { rec.stop(); setListening(false); }
+    if (next && !listening) startSession();
   };
 
   if (!supported) {
@@ -274,18 +281,18 @@ function VoicePanel({ onDraft, paused }) {
   }
 
   return (
-    <div className="card" style={{ margin: "28px 0 20px", padding: "22px 24px", display: "flex", alignItems: "center", gap: 22, flexWrap: "wrap" }}>
+    <div className="card" style={{ margin: "28px 0 20px", padding: "22px 24px", display: "flex", alignItems: "center", gap: 22, flexWrap: "wrap", opacity: paused ? 0.5 : 1 }}>
       <button
         className={"orb" + (listening ? " listening" : "")}
         onClick={toggle}
-        aria-label={listening ? "Stop listening" : "Start dictating a date"}
-        title={listening ? "Stop" : "Dictate"}
+        disabled={paused}
+        aria-label={listening ? "Listening" : "Start dictating a date"}
       >
         {listening ? "◉" : "🎙"}
       </button>
       <div style={{ flex: 1, minWidth: 220 }}>
         <div style={{ fontFamily: "var(--serif)", fontSize: 19, fontStyle: transcript ? "normal" : "italic", color: transcript ? "var(--ink)" : "var(--faded)" }}>
-          {transcript || (listening ? "Listening…" : "Tap the orb and speak — name, occasion, date, and what to arrange.")}
+          {transcript || (listening ? "Listening — take your time, I'll wait for a pause." : "Tap the orb and speak — name, occasion, date, and what to arrange.")}
         </div>
         {micError
           ? <div style={{ fontSize: 12, color: "var(--red)", marginTop: 6 }}>{micError}</div>
@@ -297,6 +304,148 @@ function VoicePanel({ onDraft, paused }) {
         <input type="checkbox" style={{ width: "auto" }} checked={handsFree} onChange={toggleHandsFree} />
         Hands-free
       </label>
+    </div>
+  );
+}
+
+// ============================================================ Voice review — understand, confirm once, auto-save
+function VoiceReview({ utterance, onSave, onCancel, onEditByHand }) {
+  const [draft, setDraft] = useState(null);
+  const [phase, setPhase] = useState("thinking"); // thinking | speaking | listening | saving
+  const [caption, setCaption] = useState("Understanding…");
+  const [heard, setHeard] = useState("");
+  const aliveRef = useRef(true);
+  const draftRef = useRef(null);
+  draftRef.current = draft;
+
+  const parse = useCallback(async (text, currentDraft) => {
+    try {
+      const r = await api.parse(text, currentDraft);
+      if (r && !r.fallback) return r;
+    } catch { /* fall through to local */ }
+    // local heuristic fallback (no ANTHROPIC_API_KEY on server)
+    if (!currentDraft) {
+      const p = parseUtterance(text);
+      return { intent: "entry", entry: { name: p.name, occasion: p.occasion, date: p.date, yearly: p.yearly, todo: p.todo, remind_days: p.remind_days }, missing: [!p.name && "name", !p.date && "date"].filter(Boolean) };
+    }
+    const c = parseCorrection(text, currentDraft);
+    if (c.action === "save") return { intent: "save" };
+    if (c.action === "cancel") return { intent: "cancel" };
+    if (c.action === "edit") return { intent: "edit_by_hand" };
+    if (c.action === "update") return { intent: "entry", entry: c.draft, missing: [] };
+    return { intent: "entry", entry: currentDraft, missing: [], unclear: true };
+  }, []);
+
+  useEffect(() => {
+    aliveRef.current = true;
+    (async () => {
+      // 1. understand the initial utterance
+      let result = await parse(utterance, null);
+      if (!aliveRef.current) return;
+
+      let firstPass = true;
+      while (aliveRef.current) {
+        if (result.intent === "cancel") { await speak("Discarded."); onCancel(); return; }
+        if (result.intent === "edit_by_hand") { onEditByHand(draftRef.current || {}); return; }
+        if (result.intent === "save" && draftRef.current?.name && draftRef.current?.date) break;
+
+        const entry = result.entry || draftRef.current;
+        if (entry) setDraft(entry);
+        const d = entry || {};
+        const missing = !d.name ? "name" : !d.date ? "date" : null;
+
+        // 2. speak — either a single missing-field question, or the summary with auto-save notice
+        setPhase("speaking");
+        let prompt;
+        if (missing === "name") prompt = "Got it — who is this for?";
+        else if (missing === "date") prompt = `${d.name} — what's the date?`;
+        else if (result.unclear) prompt = "Say yes to keep it, or tell me what to change.";
+        else prompt = `${draftSummary(d)}. Saving — say stop to change anything.`;
+        setCaption(prompt);
+        await speak(prompt);
+        if (!aliveRef.current) return;
+
+        // 3. listen: short grace window on a complete summary, generous window for answers
+        setPhase("listening");
+        setHeard("");
+        const { text } = await listenUntilSilence({
+          silenceMs: 2000,
+          maxMs: 30000,
+          noSpeechMs: missing || result.unclear ? 10000 : 3500, // 3.5s of silence on a summary = consent
+          onPartial: setHeard,
+        });
+        if (!aliveRef.current) return;
+
+        if (!text) {
+          if (!missing && !result.unclear) break; // silence after summary → save
+          setCaption("Still there? You can also use the buttons below.");
+          result = { intent: "entry", entry: draftRef.current, missing: [], unclear: true };
+          continue;
+        }
+
+        // interruption or answer → re-parse with context
+        setPhase("thinking");
+        setCaption("One moment…");
+        result = await parse(text, draftRef.current);
+        firstPass = false;
+      }
+
+      // 4. save
+      if (!aliveRef.current) return;
+      const final = draftRef.current;
+      setPhase("saving");
+      speak("Kept.");
+      onSave(final);
+    })();
+    return () => { aliveRef.current = false; stopSpeaking(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const d = draft || {};
+  const occ = OCCASIONS.find((o) => o.id === d.occasion) || { emoji: "📌", label: "Date" };
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(10,9,7,0.78)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
+      <div className="card fadein" style={{ padding: 28, width: "100%", maxWidth: 480, background: "var(--bg)", textAlign: "center" }}>
+        <div className={"orb" + (phase === "listening" ? " listening" : "")}
+          style={{ margin: "0 auto 18px", cursor: "default" }} aria-hidden="true">
+          {phase === "listening" ? "◉" : phase === "thinking" ? "…" : "🔊"}
+        </div>
+
+        {draft ? (
+          <>
+            <div style={{ fontFamily: "var(--serif)", fontSize: 24, fontWeight: 600 }}>
+              {occ.emoji} {d.name || "—"}
+            </div>
+            <div style={{ color: "var(--faded)", fontSize: 14, marginTop: 4 }}>
+              {occ.label}{d.date ? ` · ${fmtDate(d.date)}` : " · date needed"}
+              {" · "}{d.remind_days === 0 ? "reminder on the day" : `reminder ${d.remind_days}d before`}
+            </div>
+            {d.todo && (
+              <div style={{ fontSize: 14, marginTop: 12, padding: "9px 13px", background: "var(--panel-2)", borderRadius: 8, borderLeft: "2px solid var(--gold)", textAlign: "left" }}>
+                {d.todo}
+              </div>
+            )}
+          </>
+        ) : (
+          <div style={{ fontFamily: "var(--serif)", fontSize: 19, fontStyle: "italic", color: "var(--faded)" }}>
+            "{utterance}"
+          </div>
+        )}
+
+        <div style={{ marginTop: 18, minHeight: 40, fontSize: 14, color: phase === "listening" ? "var(--gold)" : "var(--faded)", fontStyle: "italic" }}>
+          {phase === "listening" ? (heard || caption) : caption}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 20 }}>
+          <button className="btn quiet" onClick={() => { aliveRef.current = false; stopSpeaking(); onCancel(); }}>Cancel</button>
+          <button className="btn ghost" onClick={() => { aliveRef.current = false; stopSpeaking(); onEditByHand(draftRef.current || {}); }}>Edit by hand</button>
+          <button className="btn" disabled={!d.name || !d.date}
+            onClick={() => { aliveRef.current = false; stopSpeaking(); onSave(draftRef.current); }}>
+            Keep it
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -341,154 +490,8 @@ function EntryCard({ e, highlight, onEdit, onDelete }) {
   );
 }
 
-// ============================================================ Voice review (hands-free confirm)
-function VoiceReview({ initial, onSave, onCancel, onEditByHand }) {
-  const [draft, setDraft] = useState(() => {
-    const { _fromVoice, _manual, _transcript, ...d } = initial;
-    return d;
-  });
-  const [phase, setPhase] = useState("speaking"); // speaking | listening | done
-  const [caption, setCaption] = useState("");
-  const [heard, setHeard] = useState("");
-  const draftRef = useRef(draft);
-  draftRef.current = draft;
-  const aliveRef = useRef(true);
-  const recRef = useRef(null);
-
-  const listenOnce = useCallback(() => new Promise((resolve) => {
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) return resolve("");
-    const rec = new SR();
-    recRef.current = rec;
-    rec.lang = "en-US";
-    rec.interimResults = true;
-    let final = "";
-    let settled = false;
-    const finish = () => { if (!settled) { settled = true; resolve(final.trim()); } };
-    rec.onresult = (ev) => {
-      let interim = "";
-      for (const r of ev.results) (r.isFinal ? (final += r[0].transcript) : (interim += r[0].transcript));
-      setHeard(final || interim);
-    };
-    rec.onerror = finish;
-    rec.onend = finish;
-    try { rec.start(); } catch { finish(); }
-    setTimeout(() => { try { rec.stop(); } catch { /* noop */ } }, 9000);
-  }), []);
-
-  const say = useCallback(async (text) => {
-    setPhase("speaking");
-    setCaption(text);
-    await speak(text);
-  }, []);
-
-  // main conversation loop
-  useEffect(() => {
-    aliveRef.current = true;
-    (async () => {
-      let opener = null; // a question about a missing field, or the summary
-      while (aliveRef.current) {
-        const d = draftRef.current;
-        const missing = !d.name ? "name" : !d.date ? "date" : null;
-
-        if (opener) await say(opener);
-        else if (missing === "name") await say(`I got the date but not the person. Who is this for?`);
-        else if (missing === "date") await say(`I have ${d.name}, but no date. When is it?`);
-        else await say(`${draftSummary(d)}. Shall I keep it?`);
-        if (!aliveRef.current) return;
-        opener = null;
-
-        setPhase("listening");
-        setHeard("");
-        const reply = await listenOnce();
-        if (!aliveRef.current) return;
-
-        if (!reply) { opener = "I didn't catch that. You can say yes, cancel, or a correction."; continue; }
-
-        // bare answers to a missing-field question
-        if (missing === "name" && reply.split(" ").length <= 4 && !/\d/.test(reply)) {
-          const name = reply.replace(/^(it'?s |for |my )/i, "").trim();
-          setDraft((p) => ({ ...p, name: name.charAt(0).toUpperCase() + name.slice(1) }));
-          continue;
-        }
-
-        const result = parseCorrection(reply, draftRef.current);
-        if (result.action === "save") {
-          const final = draftRef.current;
-          if (!final.name || !final.date) { opener = "One more thing first."; continue; }
-          aliveRef.current = false;
-          setPhase("done");
-          await speak(`Kept. I'll email you ${final.remind_days === 0 ? "on the day" : "before"}.`);
-          onSave(final);
-          return;
-        }
-        if (result.action === "cancel") {
-          aliveRef.current = false;
-          stopSpeaking();
-          await speak("Discarded.");
-          onCancel();
-          return;
-        }
-        if (result.action === "edit") { aliveRef.current = false; stopSpeaking(); onEditByHand(draftRef.current); return; }
-        if (result.action === "update") {
-          setDraft(result.draft);
-          opener = null; // loop re-reads the updated summary
-          continue;
-        }
-        opener = "Sorry, I didn't get that. Say yes to keep it, or tell me what to change — the name, the date, the reminder, or the note.";
-      }
-    })();
-    return () => {
-      aliveRef.current = false;
-      stopSpeaking();
-      try { recRef.current?.abort(); } catch { /* noop */ }
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const occ = OCCASIONS.find((o) => o.id === draft.occasion) || { emoji: "📌", label: "Date" };
-
-  return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(10,9,7,0.78)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}>
-      <div className="card fadein" style={{ padding: 28, width: "100%", maxWidth: 480, background: "var(--bg)", textAlign: "center" }}>
-        <div className={"orb" + (phase === "listening" ? " listening" : "")}
-          style={{ margin: "0 auto 18px", cursor: "default" }} aria-hidden="true">
-          {phase === "listening" ? "◉" : "🔊"}
-        </div>
-
-        <div style={{ fontFamily: "var(--serif)", fontSize: 24, fontWeight: 600 }}>
-          {occ.emoji} {draft.name || "—"}
-        </div>
-        <div style={{ color: "var(--faded)", fontSize: 14, marginTop: 4 }}>
-          {occ.label}{draft.date ? ` · ${fmtDate(draft.date)}` : " · date needed"}
-          {" · "}{draft.remind_days === 0 ? "reminder on the day" : `reminder ${draft.remind_days}d before`}
-        </div>
-        {draft.todo && (
-          <div style={{ fontSize: 14, marginTop: 12, padding: "9px 13px", background: "var(--panel-2)", borderRadius: 8, borderLeft: "2px solid var(--gold)", textAlign: "left" }}>
-            {draft.todo}
-          </div>
-        )}
-
-        <div style={{ marginTop: 18, minHeight: 40, fontSize: 14, color: phase === "listening" ? "var(--gold)" : "var(--faded)", fontStyle: "italic" }}>
-          {phase === "listening" ? (heard || "Listening… say yes, a correction, or cancel.") : caption}
-        </div>
-
-        <div style={{ display: "flex", justifyContent: "center", gap: 10, marginTop: 20 }}>
-          <button className="btn quiet" onClick={() => { aliveRef.current = false; stopSpeaking(); onCancel(); }}>Cancel</button>
-          <button className="btn ghost" onClick={() => { aliveRef.current = false; stopSpeaking(); onEditByHand(draftRef.current); }}>Edit by hand</button>
-          <button className="btn" disabled={!draft.name || !draft.date}
-            onClick={() => { aliveRef.current = false; stopSpeaking(); onSave(draftRef.current); }}>
-            Keep it
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// ============================================================ Entry form
+// ============================================================ Entry form (manual fallback)
 function EntryForm({ initial, onCancel, onSubmit }) {
-  const fromVoice = initial._fromVoice;
   const [name, setName] = useState(initial.name || "");
   const [occasion, setOccasion] = useState(initial.occasion || "birthday");
   const [date, setDate] = useState(initial.date || "");
@@ -506,13 +509,8 @@ function EntryForm({ initial, onCancel, onSubmit }) {
     >
       <div className="card fadein" style={{ padding: 26, width: "100%", maxWidth: 480, maxHeight: "92vh", overflowY: "auto", background: "var(--bg)" }}>
         <h2 style={{ fontFamily: "var(--serif)", fontSize: 24, fontWeight: 500, margin: 0 }}>
-          {initial.id ? "Edit" : fromVoice ? "Heard you — confirm the details" : "Add a date"}
+          {initial.id ? "Edit" : "Add a date"}
         </h2>
-        {fromVoice && (
-          <p style={{ fontSize: 13, color: "var(--faded)", fontStyle: "italic", margin: "8px 0 0" }}>
-            "{initial._transcript}"
-          </p>
-        )}
 
         <label style={label}>Who is this for?</label>
         <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Mother, James, the Hendersons…" autoFocus={!name} />
