@@ -3,6 +3,7 @@ import {
   api, setToken, hasToken, clearToken,
   OCCASIONS, parseUtterance, fmtDate, humanDays,
   speak, stopSpeaking, speakWithBargeIn, draftSummary, parseCorrection, persona, leadPhrase,
+  bargeInEnabled, setBargeInEnabled,
 } from "./lib.js";
 import Calendar from "./Calendar.jsx";
 
@@ -789,6 +790,16 @@ function SettingsModal({ onClose, notify }) {
         </p>
         <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ padding: 8 }}
           onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
+
+        <div style={sect}>Voice</div>
+        <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 14, cursor: "pointer" }}>
+          <input type="checkbox" style={{ width: "auto" }} defaultChecked={bargeInEnabled()}
+            onChange={(e) => { setBargeInEnabled(e.target.checked); notify(e.target.checked ? "Interruptions on." : "Interruptions off — smoother voice on this device."); }} />
+          Allow interrupting Jarvis mid-sentence
+        </label>
+        <p style={{ fontSize: 12, color: "var(--faded)", margin: "6px 0 0" }}>
+          If the voice sounds choppy or quiet on this device, turn this off — some phones and Bluetooth headsets lower the speaker whenever the mic is listening.
+        </p>
 
         <div style={sect}>Billing</div>
         {me?.plan === "active"

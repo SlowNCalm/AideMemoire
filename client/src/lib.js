@@ -185,11 +185,19 @@ export function speak(text) {
       // Chrome quirks: cancel() immediately before speak() can silently swallow
       // the utterance, and long speech can auto-pause. Delay slightly, nudge
       // with resume(), and retry once if speech never starts.
-      setTimeout(() => { try { synth.speak(u); synth.resume(); } catch { finish(); } }, 80);
+      setTimeout(() => { try { synth.speak(u); synth.resume(); } catch { finish(); } }, 60);
+      // retry ONLY if the engine truly never started (was 900ms — too eager; it
+      // cancelled slow-starting speech mid-word, causing audible cut-outs)
       setTimeout(() => {
-        if (!started && !done) { try { synth.cancel(); synth.speak(u); synth.resume(); } catch { finish(); } }
-      }, 900);
-      const keepAlive = setInterval(() => { if (!done) { try { synth.resume(); } catch { /* noop */ } } }, 4000);
+        if (!started && !done && !synth.speaking && !synth.pending) {
+          try { synth.cancel(); synth.speak(u); synth.resume(); } catch { finish(); }
+        }
+      }, 2500);
+      // gentle anti-pause nudge for LONG speech only; frequent resume() on short
+      // lines causes stutter on some platforms
+      const keepAlive = text.length > 180
+        ? setInterval(() => { if (!done && synth.paused) { try { synth.resume(); } catch { /* noop */ } } }, 6000)
+        : setInterval(() => {}, 1 << 30);
       setTimeout(finish, 4500 + text.length * 110);
     } catch { resolve(); }
   });
@@ -197,10 +205,22 @@ export function speak(text) {
 
 // Speak while listening for an interruption ("stop", "wait", "no, make it…").
 // Echo-guard: ignores transcripts that are just the TTS voice leaking into the mic.
+export function bargeInEnabled() {
+  try { return window.localStorage.getItem("am_bargein") !== "off"; } catch { return true; }
+}
+export function setBargeInEnabled(on) {
+  try { window.localStorage.setItem("am_bargein", on ? "on" : "off"); } catch { /* noop */ }
+}
+
 export function speakWithBargeIn(text) {
   return new Promise((resolve) => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) { speak(text).then(() => resolve({ heard: null })); return; }
+    // Short lines ("Kept.", "The calendar, sir.") don't need interruption support —
+    // running a recognizer for them just ducks the speaker and adds start lag.
+    if (!SR || !bargeInEnabled() || text.length < 70) {
+      speak(text).then(() => resolve({ heard: null }));
+      return;
+    }
 
     const norm = (t) => t.toLowerCase().replace(/[^a-z0-9' ]/g, " ").split(/\s+/).filter(Boolean);
     const spokenWords = new Set(norm(text));
