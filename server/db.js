@@ -45,9 +45,39 @@ try { db.exec("ALTER TABLE entries ADD COLUMN user_id TEXT"); } catch { /* exist
 try { db.exec("ALTER TABLE entries ADD COLUMN relationship TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE entries ADD COLUMN notes TEXT DEFAULT ''"); } catch { /* exists */ }
 try { db.exec("ALTER TABLE users ADD COLUMN phone TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'trial'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN trial_ends TEXT"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN stripe_customer TEXT"); } catch { /* exists */ }
+db.exec(`CREATE TABLE IF NOT EXISTS calendar_accounts (
+  id            TEXT PRIMARY KEY,
+  user_id       TEXT NOT NULL,
+  provider      TEXT NOT NULL,           -- 'google' | 'microsoft'
+  label         TEXT DEFAULT '',
+  access_token  TEXT NOT NULL,
+  refresh_token TEXT DEFAULT '',
+  expires_at    INTEGER DEFAULT 0,       -- epoch ms
+  created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+)`);
+try { db.exec("ALTER TABLE users ADD COLUMN ics_url TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN feed_token TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN plan TEXT DEFAULT 'beta'"); } catch { /* exists */ }
+try { db.exec("ALTER TABLE users ADD COLUMN stripe_customer TEXT DEFAULT ''"); } catch { /* exists */ }
+try { db.exec(`CREATE TABLE IF NOT EXISTS push_subs (
+  user_id TEXT NOT NULL, endpoint TEXT NOT NULL, sub_json TEXT NOT NULL,
+  PRIMARY KEY (user_id, endpoint))`); } catch { /* exists */ }
 
 export const Users = {
   setPhone: (id, phone) => db.prepare("UPDATE users SET phone = ? WHERE id = ?").run(phone, id),
+  setPlan: (id, plan) => db.prepare("UPDATE users SET plan = ? WHERE id = ?").run(plan, id),
+  setStripeCustomer: (id, cust) => db.prepare("UPDATE users SET stripe_customer = ? WHERE id = ?").run(cust, id),
+  byStripeCustomer: (cust) => db.prepare("SELECT * FROM users WHERE stripe_customer = ?").get(cust),
+  setTrialEnds: (id, iso) => db.prepare("UPDATE users SET trial_ends = ? WHERE id = ?").run(iso, id),
+  setIcs: (id, url) => db.prepare("UPDATE users SET ics_url = ? WHERE id = ?").run(url, id),
+  setFeedToken: (id, t) => db.prepare("UPDATE users SET feed_token = ? WHERE id = ?").run(t, id),
+  byFeedToken: (t) => db.prepare("SELECT * FROM users WHERE feed_token = ?").get(t),
+  setPlan: (id, plan) => db.prepare("UPDATE users SET plan = ? WHERE id = ?").run(plan, id),
+  setStripeCustomer: (id, c) => db.prepare("UPDATE users SET stripe_customer = ? WHERE id = ?").run(c, id),
+  byStripeCustomer: (c) => db.prepare("SELECT * FROM users WHERE stripe_customer = ?").get(c),
   byEmail: (email) => db.prepare("SELECT * FROM users WHERE email = ?").get(email.toLowerCase()),
   byId: (id) => db.prepare("SELECT * FROM users WHERE id = ?").get(id),
   count: () => db.prepare("SELECT COUNT(*) n FROM users").get().n,
@@ -76,9 +106,27 @@ export const Entries = {
   adoptOrphans: (userId) => db.prepare("UPDATE entries SET user_id = ? WHERE user_id IS NULL").run(userId),
 };
 
+export const Calendars = {
+  forUser: (userId) => db.prepare("SELECT * FROM calendar_accounts WHERE user_id = ?").all(userId),
+  get: (id, userId) => db.prepare("SELECT * FROM calendar_accounts WHERE id = ? AND user_id = ?").get(id, userId),
+  upsert: (c) => {
+    db.prepare("DELETE FROM calendar_accounts WHERE user_id = ? AND provider = ? AND label = ?").run(c.user_id, c.provider, c.label);
+    db.prepare(`INSERT INTO calendar_accounts (id, user_id, provider, label, access_token, refresh_token, expires_at)
+      VALUES (@id, @user_id, @provider, @label, @access_token, @refresh_token, @expires_at)`).run(c);
+  },
+  updateTokens: (id, access, expiresAt) => db.prepare("UPDATE calendar_accounts SET access_token = ?, expires_at = ? WHERE id = ?").run(access, expiresAt, id),
+  remove: (id, userId) => db.prepare("DELETE FROM calendar_accounts WHERE id = ? AND user_id = ?").run(id, userId),
+};
+
 export const Sent = {
   has: (entryId, occ) => !!db.prepare("SELECT 1 FROM sent_reminders WHERE entry_id = ? AND occurrence_date = ?").get(entryId, occ),
   mark: (entryId, occ) => db.prepare("INSERT OR IGNORE INTO sent_reminders (entry_id, occurrence_date) VALUES (?, ?)").run(entryId, occ),
 };
 
 export default db;
+
+export const PushSubs = {
+  add: (userId, sub) => db.prepare("INSERT OR REPLACE INTO push_subs (user_id, endpoint, sub_json) VALUES (?, ?, ?)").run(userId, sub.endpoint, JSON.stringify(sub)),
+  forUser: (userId) => db.prepare("SELECT sub_json FROM push_subs WHERE user_id = ?").all(userId).map((r) => JSON.parse(r.sub_json)),
+  remove: (userId, endpoint) => db.prepare("DELETE FROM push_subs WHERE user_id = ? AND endpoint = ?").run(userId, endpoint),
+};

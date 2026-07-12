@@ -150,6 +150,12 @@ function Dashboard({ onLogout }) {
   const [thinking, setThinking] = useState(false);
   const [draftMsg, setDraftMsg] = useState(null);        // {message} from the "draft" intent
   const [showSettings, setShowSettings] = useState(false);
+  const [me, setMe] = useState(null);
+  useEffect(() => { api.me().then(setMe).catch(() => {}); }, []);
+  const upgrade = async () => {
+    try { const { url } = await api.checkout(); window.location.href = url; }
+    catch (e) { notify(e.message); }
+  };
   const historyRef = useRef([]);                          // rolling conversation memory
   const remember = (role, text) => {
     if (!text) return;
@@ -171,6 +177,15 @@ function Dashboard({ onLogout }) {
   }, [onLogout]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (p.get("calendar") === "connected") { notify("Calendar connected — conflict warnings now check your real schedule."); speak("Calendar connected, sir."); }
+    if (p.get("calendar") === "error") notify("Calendar connection failed — try again from Settings.");
+    if (p.get("billing") === "success") { notify("Welcome aboard — subscription active."); speak("Delighted to have you properly aboard, sir."); }
+    if ([...p.keys()].length) window.history.replaceState({}, "", "/");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // chief-of-staff briefing, spoken once per session
   const briefedRef = useRef(false);
@@ -303,6 +318,17 @@ function Dashboard({ onLogout }) {
         ))}
         {thinking && <span style={{ alignSelf: "center", fontSize: 13, color: "var(--faded)", fontStyle: "italic" }}>One moment…</span>}
       </div>
+
+      {me && me.plan !== "active" && (
+        <div className="card" style={{ padding: "10px 16px", margin: "0 0 18px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap", borderColor: me.plan === "expired" ? "var(--red)" : "var(--line)" }}>
+          <span style={{ fontSize: 13, color: me.plan === "expired" ? "var(--red)" : "var(--faded)" }}>
+            {me.plan === "expired"
+              ? "Your trial has ended — your ledger is safe, but adding is paused."
+              : `Trial: ${me.trial_days_left} day${me.trial_days_left === 1 ? "" : "s"} remaining.`}
+          </span>
+          {me.billing_available && <button className="btn" style={{ padding: "7px 16px", fontSize: 13 }} onClick={upgrade}>Upgrade — $19/mo</button>}
+        </div>
+      )}
 
       {toast && (
         <div className="card fadein" style={{ padding: "12px 16px", margin: "0 0 20px", borderColor: "var(--gold)", color: "var(--gold)", fontSize: 14 }}>
@@ -679,27 +705,98 @@ function DraftModal({ message, onClose }) {
   );
 }
 
-// ============================================================ Settings (phone for SMS)
+// ============================================================ Settings (SMS, calendars, import, billing)
 function SettingsModal({ onClose, notify }) {
   const [phone, setPhoneVal] = useState("");
   const [loaded, setLoaded] = useState(false);
-  useEffect(() => { api.me().then((m) => { setPhoneVal(m.phone || ""); setLoaded(true); }).catch(() => setLoaded(true)); }, []);
-  const saveIt = async () => {
-    try { await api.setPhone(phone); notify(phone ? "Phone saved — text reminders enabled if SMS is configured." : "Phone removed."); onClose(); }
+  const [me, setMe] = useState(null);
+  const [cals, setCals] = useState({ connected: [], available: {} });
+  const fileRef = useRef(null);
+
+  const loadCals = () => api.calendars().then(setCals).catch(() => {});
+  useEffect(() => {
+    api.me().then((m) => { setMe(m); setPhoneVal(m.phone || ""); setLoaded(true); }).catch(() => setLoaded(true));
+    loadCals();
+  }, []);
+
+  const savePhone = async () => {
+    try { await api.setPhone(phone); notify(phone ? "Phone saved." : "Phone removed."); }
     catch (e) { notify(e.message); }
   };
+  const connect = async (provider) => {
+    try { const { url } = await api.calendarUrl(provider); window.location.href = url; }
+    catch (e) { notify(e.message); }
+  };
+  const disconnect = async (id) => { await api.calendarRemove(id).catch(() => {}); loadCals(); };
+
+  // CSV import: name,date,occasion,relationship,notes,todo,remind_days  (header row optional)
+  const importCsv = async (file) => {
+    const text = await file.text();
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    const rows = [];
+    for (const line of lines) {
+      // simple CSV split honoring double-quoted fields
+      const cells = line.match(/("([^"]|"")*"|[^,]*)(,|$)/g)?.map((c) => c.replace(/,$/, "").replace(/^"|"$/g, "").replace(/""/g, '"').trim()) || [];
+      if (/^name$/i.test(cells[0] || "")) continue; // header
+      const [name, date, occasion, relationship, notes, todo, remind] = cells;
+      if (!name || !date) continue;
+      // accept yyyy-mm-dd or mm/dd/yyyy
+      let iso = date;
+      const us = date.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+      if (us) iso = `${us[3]}-${us[1].padStart(2, "0")}-${us[2].padStart(2, "0")}`;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) continue;
+      rows.push({ name, date: iso, occasion: (occasion || "birthday").toLowerCase(), yearly: true, relationship: relationship || "", notes: notes || "", todo: todo || "", remind_days: Number(remind) || 7 });
+    }
+    if (!rows.length) { notify("No usable rows found. Expected columns: name, date, occasion, relationship, notes."); return; }
+    try {
+      const r = await api.bulkImport(rows);
+      notify(`Imported ${r.created} people${r.skipped ? ` (${r.skipped} skipped)` : ""}. Refresh to see them.`);
+    } catch (e) { notify(e.message); }
+  };
+
+  const sect = { fontSize: 11, fontWeight: 600, color: "var(--faded)", textTransform: "uppercase", letterSpacing: "0.08em", margin: "20px 0 8px" };
+
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(10,9,7,0.72)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16, zIndex: 50 }}
       onClick={(ev) => ev.target === ev.currentTarget && onClose()}>
-      <div className="card fadein" style={{ padding: 26, width: "100%", maxWidth: 420, background: "var(--bg)" }}>
-        <h2 style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 500, margin: "0 0 6px" }}>Settings</h2>
-        <p style={{ fontSize: 13, color: "var(--faded)", margin: "0 0 14px" }}>
-          Add a mobile number (with country code, e.g. +15551234567) to also receive reminders by text.
+      <div className="card fadein" style={{ padding: 26, width: "100%", maxWidth: 480, maxHeight: "92vh", overflowY: "auto", background: "var(--bg)" }}>
+        <h2 style={{ fontFamily: "var(--serif)", fontSize: 22, fontWeight: 500, margin: 0 }}>Settings</h2>
+
+        <div style={sect}>Text reminders</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input placeholder="+15551234567" value={phone} disabled={!loaded} onChange={(e) => setPhoneVal(e.target.value)} />
+          <button className="btn quiet" onClick={savePhone}>Save</button>
+        </div>
+
+        <div style={sect}>Connected calendars</div>
+        <p style={{ fontSize: 12.5, color: "var(--faded)", margin: "0 0 10px" }}>
+          Connect a calendar and conflict warnings check your real schedule — "that collides with your 2 PM closing."
         </p>
-        <input placeholder="+1…" value={phone} disabled={!loaded} onChange={(e) => setPhoneVal(e.target.value)} />
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 }}>
-          <button className="btn quiet" onClick={onClose}>Cancel</button>
-          <button className="btn" onClick={saveIt}>Save</button>
+        {cals.connected.map((c) => (
+          <div key={c.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid var(--line)" }}>
+            <span style={{ fontSize: 14 }}>{c.provider === "google" ? "📅 " : "📆 "}{c.label}</span>
+            <button className="linklike" onClick={() => disconnect(c.id)}>Disconnect</button>
+          </div>
+        ))}
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button className="btn quiet" onClick={() => connect("google")}>+ Google Calendar</button>
+          <button className="btn quiet" onClick={() => connect("microsoft")}>+ Outlook</button>
+        </div>
+
+        <div style={sect}>Import your people</div>
+        <p style={{ fontSize: 12.5, color: "var(--faded)", margin: "0 0 10px" }}>
+          CSV with columns: name, date (YYYY-MM-DD or MM/DD/YYYY), occasion, relationship, notes. Up to 500 rows.
+        </p>
+        <input ref={fileRef} type="file" accept=".csv,text/csv" style={{ padding: 8 }}
+          onChange={(e) => e.target.files?.[0] && importCsv(e.target.files[0])} />
+
+        <div style={sect}>Billing</div>
+        {me?.plan === "active"
+          ? <button className="btn quiet" onClick={async () => { try { const { url } = await api.billingPortal(); window.location.href = url; } catch (e) { notify(e.message); } }}>Manage subscription</button>
+          : <p style={{ fontSize: 13, color: "var(--faded)", margin: 0 }}>{me ? `Trial — ${me.trial_days_left} day(s) left.` : ""}</p>}
+
+        <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 22 }}>
+          <button className="btn" onClick={onClose}>Done</button>
         </div>
       </div>
     </div>

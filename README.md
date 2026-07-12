@@ -54,6 +54,9 @@ ACCESS_CODE=test REMINDER_EMAIL_TO=you@example.com RESEND_API_KEY=re_xxx npm sta
 
 For live-reload frontend work: `npm start` in one terminal, `cd client && npm run dev` in another (Vite proxies `/api` to :3000).
 
+## Integrations (Stripe billing, Google Calendar, Outlook)
+See **SETUP-INTEGRATIONS.md** for the step-by-step console setup. All integrations are optional and fail gracefully until configured.
+
 ## Environment variables
 
 | Variable | Required | Purpose |

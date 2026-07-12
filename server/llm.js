@@ -141,7 +141,21 @@ export async function assistant({ text, draft, entries, today, history }) {
 
 
 // Morning briefing: a chief-of-staff style spoken summary of what needs attention.
-const BRIEFING_SYSTEM = `You are Aide-Mémoire, a composed, dryly witty English butler AI serving as executive assistant. Original phrasing only — never imitate any film character. Given today's date and the user's ledger of important dates, compose ONE spoken briefing (max ~70 words): greet appropriately for the time of day, then cover what needs attention — anything inside its reminder window first (with the to-do), then notable items in the next two weeks. Mention same-day collisions if any. If nothing is pressing, say so gracefully and note the next upcoming item. Address the speaker as "sir". Return ONLY the briefing text, no JSON, no quotes.`;
+const BRIEFING_SYSTEM = `You are Aide-Mémoire, a composed, dryly witty English butler AI serving as executive assistant. Original phrasing only — never imitate any film character. Given today's date and the user's ledger of important dates, compose ONE spoken briefing (max ~85 words): greet appropriately for the time of day, then cover what needs attention — anything inside its reminder window first (with the to-do), then notable items in the next two weeks. Mention same-day collisions if any. If a NEGLECTED list is provided, close with ONE gentle relationship-health nudge (e.g. "And if I may — it has been some time since anything was planned for X; perhaps a call."). If nothing is pressing, say so gracefully and note the next upcoming item. Address the speaker as "sir". Return ONLY the briefing text, no JSON, no quotes.`;
+
+// People with no touchpoint on the horizon — the quiet relationship leaks.
+export function neglectedPeople(entries) {
+  const byName = {};
+  for (const e of entries || []) {
+    const k = e.name.toLowerCase();
+    byName[k] = Math.min(byName[k] ?? Infinity, e.days_until);
+  }
+  return Object.entries(byName)
+    .filter(([, days]) => days > 60)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([name, days]) => ({ name: name.replace(/\b\w/g, (c) => c.toUpperCase()), days_until_next: days }));
+}
 
 function templateBriefing(entries, hour) {
   const due = (entries || []).filter((e) => e.days_until <= e.remind_days).sort((a, b) => a.days_until - b.days_until);
@@ -152,7 +166,9 @@ function templateBriefing(entries, hour) {
     return `${hello} Nothing presses today.${next ? ` The next matter is ${next.name}, in ${next.days_until} days.` : " The ledger is empty — say the word and I shall begin it."}`;
   }
   const parts = due.slice(0, 3).map((e) => `${e.name} ${e.days_until === 0 ? "today" : "in " + e.days_until + " days"}${e.todo ? ", " + e.todo : ""}`);
-  return `${hello} ${due.length ? `Requiring attention: ${parts.join("; ")}.` : ""} ${soon.length ? `Also ahead: ${soon.slice(0, 2).map((e) => `${e.name} in ${e.days_until} days`).join(", ")}.` : ""}`.trim();
+  const neg = neglectedPeople(entries);
+  const nudge = neg.length ? ` And if I may — nothing is planned for ${neg[0].name} in the next two months; perhaps a call.` : "";
+  return (`${hello} ${due.length ? `Requiring attention: ${parts.join("; ")}.` : ""} ${soon.length ? `Also ahead: ${soon.slice(0, 2).map((e) => `${e.name} in ${e.days_until} days`).join(", ")}.` : ""}`.trim()) + nudge;
 }
 
 export async function briefing({ entries, today, hour }) {
@@ -162,10 +178,12 @@ export async function briefing({ entries, today, hour }) {
       name: e.name, occasion: e.occasion, next: e.next_occurrence, days_until: e.days_until,
       remind_days: e.remind_days, todo: e.todo || undefined, relationship: e.relationship || undefined,
     }));
+    const neglected = neglectedPeople(entries);
     const out = await chatLLM({
       system: BRIEFING_SYSTEM,
-      user: `Today is ${today}, hour ${hour}. LEDGER: ${JSON.stringify(ledger)}`,
-      maxTokens: 300,
+      user: `Today is ${today}, hour ${hour}. LEDGER: ${JSON.stringify(ledger)}` +
+        (neglected.length ? ` NEGLECTED: ${JSON.stringify(neglected)}` : ""),
+      maxTokens: 320,
     });
     if (!out) return templateBriefing(entries, hour);
     return out.trim();

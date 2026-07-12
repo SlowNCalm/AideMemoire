@@ -41,6 +41,12 @@ export const api = {
   briefing: () => req("/api/briefing"),
   me: () => req("/api/me"),
   setPhone: (phone) => req("/api/me", { method: "PATCH", body: JSON.stringify({ phone }) }),
+  bulkImport: (entries) => req("/api/entries/bulk", { method: "POST", body: JSON.stringify({ entries }) }),
+  calendars: () => req("/api/calendar/list"),
+  calendarUrl: (provider) => req(`/api/calendar/url/${provider}`, { method: "POST" }),
+  calendarRemove: (id) => req(`/api/calendar/${id}`, { method: "DELETE" }),
+  checkout: () => req("/api/billing/checkout", { method: "POST" }),
+  billingPortal: () => req("/api/billing/portal", { method: "POST" }),
 };
 
 // ---------------- occasions ----------------
